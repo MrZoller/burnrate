@@ -15,6 +15,16 @@ LOG="$HOME/Library/Logs/burnrate.log"
 HOST="${BURNRATE_HOST:-0.0.0.0}"
 PORT="${BURNRATE_PORT:-8377}"
 DB="${BURNRATE_DB:-$HOME/.local/share/burnrate/burnrate.db}"
+# Absolute, always. A relative path is resolved by the agent against the plist's
+# WorkingDirectory ($REPO) but by `uninstall.sh --purge` against whatever
+# directory the uninstaller was run from -- so purge would miss the real database
+# and could delete an unrelated file of the same name somewhere else. Anchoring
+# it here to the invoking shell's cwd, which is what a user setting a relative
+# BURNRATE_DB means, makes every consumer agree on one path.
+case "$DB" in
+  /*) ;;
+  *) DB="$PWD/$DB" ;;
+esac
 # launchd starts the agent with none of this shell's environment, so anything not
 # baked into the plist is simply absent at runtime. The README documents all four
 # of these as install-time overrides; the interval was the one not being captured,
@@ -43,16 +53,22 @@ if launchctl print "gui/$UID/$LABEL" >/dev/null 2>&1; then
   launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
 fi
 
-sed \
-  -e "s|__LABEL__|$LABEL|g" \
-  -e "s|__PYTHON__|$PYTHON|g" \
-  -e "s|__REPO__|$REPO|g" \
-  -e "s|__DB__|$DB|g" \
-  -e "s|__HOST__|$HOST|g" \
-  -e "s|__PORT__|$PORT|g" \
-  -e "s|__INTERVAL__|$INTERVAL|g" \
-  -e "s|__LOG__|$LOG|g" \
-  "$PLIST_SRC" > "$PLIST_DST"
+# Rendered by the package, not by sed. In a sed replacement `&` means "the text
+# that matched", so a path like /tmp/a&b.db silently became /tmp/a__DB__b.db --
+# well-formed XML, so the lint below passed and the agent used the wrong
+# database. `|` broke the expression and `<` produced invalid XML; those at least
+# failed loudly. The values also need XML escaping, and layering both escapes by
+# hand in shell is exactly where this goes wrong. Values are passed as argv, so
+# the shell's quoting is authoritative and nothing is re-parsed.
+"$PYTHON" -m burnrate.plist "$PLIST_SRC" "$PLIST_DST" \
+  LABEL "$LABEL" \
+  PYTHON "$PYTHON" \
+  REPO "$REPO" \
+  DB "$DB" \
+  HOST "$HOST" \
+  PORT "$PORT" \
+  INTERVAL "$INTERVAL" \
+  LOG "$LOG" || die "could not render the plist"
 
 plutil -lint "$PLIST_DST" >/dev/null || die "generated plist is invalid: $PLIST_DST"
 

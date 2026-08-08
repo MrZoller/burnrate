@@ -20,6 +20,24 @@ DB="${DB:-${BURNRATE_DB:-$HOME/.local/share/burnrate/burnrate.db}}"
 PURGE=0
 [ "${1:-}" = "--purge" ] && PURGE=1
 
+# A relative path here cannot be resolved safely. The agent resolved it against
+# the plist's WorkingDirectory; we would resolve it against wherever this script
+# was invoked from, which is a different file -- so purging would leave the real
+# database in place and delete something else that happens to share the name.
+# Installs since the absolute-path fix cannot produce this, but a plist written
+# before it can still be sitting on disk. Refuse rather than guess.
+if [ "$PURGE" -eq 1 ]; then
+  case "$DB" in
+    /*) ;;
+    *)
+      printf 'error: the recorded database path is relative (%s), so --purge\n' "$DB" >&2
+      printf '       cannot tell which file it means. Delete it by hand, or pass\n' >&2
+      printf '       BURNRATE_DB=/absolute/path to say explicitly.\n' >&2
+      exit 1
+      ;;
+  esac
+fi
+
 if launchctl print "gui/$UID/$LABEL" >/dev/null 2>&1; then
   launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
   printf 'Stopped %s\n' "$LABEL"
