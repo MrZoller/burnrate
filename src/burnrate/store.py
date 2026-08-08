@@ -49,6 +49,12 @@ CREATE TABLE IF NOT EXISTS raw_snapshots (
 CREATE INDEX IF NOT EXISTS idx_raw_ts ON raw_snapshots (ts);
 """
 
+# Points per bucket returned by history(). At a 60s poll a 7-day window holds
+# 10,080 samples per bucket, and the browser refetches every minute; 90 days is
+# 129,600. The chart cannot resolve more than a few hundred pixels of width, so
+# the rest is pure transfer and render cost.
+MAX_POINTS_PER_BUCKET = 720
+
 SAMPLE_RETENTION_DAYS = 90
 RAW_RETENTION_DAYS = 14
 
@@ -140,28 +146,54 @@ class Store:
         conn.execute("INSERT INTO raw_snapshots (ts, body) VALUES (?, ?)", (_iso(ts), body))
 
     def latest_per_bucket(self) -> list[Sample]:
-        """The most recent sample for each bucket seen."""
+        """Every bucket from the most recent snapshot -- and nothing else.
+
+        Deliberately not "each bucket's newest row": that resurrects a bucket
+        the API has stopped reporting, and since staleness is measured from the
+        newest sample overall, the ghost is then presented as current beside
+        genuinely fresh readings. A bucket that vanished must disappear from the
+        dashboard, not linger at whatever value it last held.
+
+        Every bucket in one snapshot shares its fetched_at, so the newest ts
+        identifies the snapshot exactly.
+        """
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT s.ts, s.bucket, s.label, s.utilization, s.resets_at, s.known
-                FROM samples s
-                JOIN (
-                    SELECT bucket, MAX(id) AS id FROM samples GROUP BY bucket
-                ) latest ON latest.id = s.id
-                ORDER BY s.bucket
+                SELECT ts, bucket, label, utilization, resets_at, known
+                FROM samples
+                WHERE ts = (SELECT MAX(ts) FROM samples)
+                ORDER BY bucket
                 """
             ).fetchall()
         return [_row_to_sample(row) for row in rows]
 
-    def history(self, hours: float = 168.0) -> list[Sample]:
-        """Every sample newer than `hours` ago, oldest first."""
+    def history(
+        self, hours: float = 168.0, max_points: int = MAX_POINTS_PER_BUCKET
+    ) -> list[Sample]:
+        """Samples from the last `hours`, downsampled, oldest first.
+
+        The window is divided into at most `max_points` slots and the LAST
+        sample in each slot is kept. Last rather than max: utilization is a step
+        function that resets to zero, so the final reading in a slot is what was
+        actually true at that time, where max would smear a pre-reset peak
+        across the drop and erase the sawtooth the 5-hour bucket is made of.
+        """
         cutoff = datetime.now(UTC) - timedelta(hours=hours)
+        slot_seconds = max(1.0, (hours * 3600.0) / max(1, max_points))
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT ts, bucket, label, utilization, resets_at, known FROM samples"
-                " WHERE ts >= ? ORDER BY ts ASC",
-                (_iso(cutoff),),
+                """
+                SELECT ts, bucket, label, utilization, resets_at, known
+                FROM samples
+                WHERE id IN (
+                    SELECT MAX(id) FROM samples
+                    WHERE ts >= ?
+                    GROUP BY bucket, CAST(strftime('%s', ts) / ? AS INTEGER)
+                )
+                ORDER BY ts ASC
+                """,
+                (_iso(cutoff), slot_seconds),
             ).fetchall()
         return [_row_to_sample(row) for row in rows]
 

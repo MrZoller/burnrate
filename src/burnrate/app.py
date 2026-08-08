@@ -26,10 +26,15 @@ from fastapi.staticfiles import StaticFiles
 from .config import STALE_AFTER_SECONDS, Config
 from .poller import Poller
 from .projection import Projection, project
-from .store import Sample, Store
+from .store import MAX_POINTS_PER_BUCKET, Sample, Store
 from .usage import KNOWN_LABELS, Bucket, UsageSnapshot, group_for, humanize
 
 logger = logging.getLogger("burnrate")
+
+# The handlers below are deliberately `def`, not `async def`. They do blocking
+# SQLite reads, and Starlette runs sync handlers in a threadpool -- as
+# coroutines they would stall the event loop, and a large history query would
+# hold up /api/now and the health check along with it.
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -54,7 +59,7 @@ def create_app(config: Config | None = None) -> FastAPI:
     app.state.poller = poller
 
     @app.get("/api/now")
-    async def now() -> JSONResponse:
+    def now() -> JSONResponse:
         """Latest reading per bucket, staleness, and the pace projection."""
         moment = datetime.now(UTC)
         buckets = _current_buckets(poller, store)
@@ -81,21 +86,22 @@ def create_app(config: Config | None = None) -> FastAPI:
         )
 
     @app.get("/api/history")
-    async def history(
+    def history(
         hours: float = Query(default=168.0, gt=0, le=90 * 24),
     ) -> JSONResponse:
-        """Samples from the last `hours`, grouped into one series per bucket."""
+        """Samples from the last `hours`, downsampled, one series per bucket."""
         samples = store.history(hours)
         return JSONResponse(
             {
                 "hours": hours,
                 "generated_at": datetime.now(UTC).isoformat(),
+                "max_points_per_bucket": MAX_POINTS_PER_BUCKET,
                 "series": _to_series(samples),
             }
         )
 
     @app.get("/api/healthz")
-    async def healthz() -> JSONResponse:
+    def healthz() -> JSONResponse:
         """Liveness plus poll health, for launchd/uptime checks."""
         return JSONResponse(
             {"ok": True, "poller_healthy": poller.status.healthy},

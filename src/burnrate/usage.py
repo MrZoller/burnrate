@@ -22,7 +22,7 @@ could not interpret surfaces in the UI as drift rather than vanishing.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -181,13 +181,21 @@ def _collect_from_top_level(
         utilization = _as_percent(value.get("utilization"))
         if utilization is None:
             continue
-        if key in buckets:
-            # limits[] already described this bucket, and does so more richly.
-            continue
-
         resets_at, reset_warning = _parse_timestamp(value.get("resets_at"))
         if reset_warning:
             warnings.append(f"{key}: {reset_warning}")
+
+        existing = buckets.get(key)
+        if existing is not None:
+            # limits[] described this bucket already and does so more richly, so
+            # it wins -- but only field by field. A limits entry carrying a
+            # percentage and a null reset would otherwise discard a perfectly
+            # good reset sitting in the top-level twin, which costs the gauge its
+            # countdown and takes the weekly projection to "unavailable" for data
+            # the response actually contained.
+            if existing.resets_at is None and resets_at is not None:
+                buckets[key] = replace(existing, resets_at=resets_at)
+            continue
 
         known = key in KNOWN_LABELS
         if not known:

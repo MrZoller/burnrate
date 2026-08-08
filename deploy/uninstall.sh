@@ -5,8 +5,17 @@ set -euo pipefail
 
 LABEL="com.mrzoller.burnrate"
 PLIST_DST="$HOME/Library/LaunchAgents/$LABEL.plist"
-DB="${BURNRATE_DB:-$HOME/.local/share/burnrate/burnrate.db}"
 LOG="$HOME/Library/Logs/burnrate.log"
+
+# The database path install.sh actually used is recorded in the plist. Read it
+# from there first: an install that set BURNRATE_DB baked that value in, and a
+# later plain `./deploy/uninstall.sh --purge` would otherwise delete the default
+# path, report success, and leave the real database and its WAL files on disk.
+DB=""
+if [ -f "$PLIST_DST" ]; then
+  DB=$(plutil -extract EnvironmentVariables.BURNRATE_DB raw -o - "$PLIST_DST" 2>/dev/null || true)
+fi
+DB="${DB:-${BURNRATE_DB:-$HOME/.local/share/burnrate/burnrate.db}}"
 
 PURGE=0
 [ "${1:-}" = "--purge" ] && PURGE=1

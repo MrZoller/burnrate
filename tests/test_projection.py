@@ -110,6 +110,22 @@ def test_over_the_cap_still_reports_at_cap():
     assert project(weekly(100.0), now=NOW).status == AT_CAP
 
 
+def test_a_full_bucket_whose_reset_passed_is_unavailable_not_at_cap():
+    """Regression: AT_CAP was checked first, so a stale 100% reading whose period
+    had already ended still reported "Weekly cap reached" -- describing a window
+    that no longer exists, while every other past-reset reading is refused."""
+    stale = weekly(100.0, resets_in=timedelta(hours=-1))
+
+    projection = project(stale, now=NOW)
+
+    assert projection.status == UNAVAILABLE
+    assert "already passed" in projection.message
+
+
+def test_a_full_bucket_inside_its_window_still_reports_at_cap():
+    assert project(weekly(100.0), now=NOW).status == AT_CAP
+
+
 def test_no_bucket_is_unavailable_not_a_crash():
     assert project(None, now=NOW).status == UNAVAILABLE
 

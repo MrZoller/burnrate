@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from burnrate.app import create_app
 from burnrate.config import Config
 from burnrate.store import Store
-from burnrate.usage import parse_usage
+from burnrate.usage import Bucket, UsageSnapshot, parse_usage
 
 NOW = datetime(2026, 8, 8, 21, 45, tzinfo=UTC)
 
@@ -122,6 +122,70 @@ def test_restored_buckets_report_the_right_known_flag(client):
     assert by_key["nimbus_quill"]["known"] is False
 
 
+def test_a_bucket_that_vanishes_is_not_resurrected(store):
+    """Regression: selecting each bucket's newest row independently revived a
+    bucket the API had stopped reporting, and staleness is measured from the
+    newest sample overall -- so a three-day-old reading was presented as current
+    beside fresh ones."""
+    old = datetime.now(UTC) - timedelta(days=3)
+    store.append_snapshot(
+        UsageSnapshot(
+            buckets=(
+                Bucket("five_hour", "5-hour session", 10.0, None, "session"),
+                Bucket("ghost", "Ghost", 99.0, None, "other"),
+            ),
+            fetched_at=old,
+        )
+    )
+    store.append_snapshot(
+        UsageSnapshot(
+            buckets=(Bucket("five_hour", "5-hour session", 42.0, None, "session"),),
+            fetched_at=datetime.now(UTC),
+        )
+    )
+
+    restored = {s.bucket: s for s in store.latest_per_bucket()}
+
+    assert set(restored) == {"five_hour"}
+    assert restored["five_hour"].utilization == 42.0
+
+
+def test_history_is_downsampled_to_a_bounded_number_of_points(store):
+    """7 days at 60s is 10,080 points per bucket, refetched every minute."""
+    now = datetime.now(UTC)
+    for i in range(3000):
+        store.append_snapshot(
+            UsageSnapshot(
+                buckets=(Bucket("five_hour", "5-hour session", float(i % 100), None, "session"),),
+                fetched_at=now - timedelta(minutes=3000 - i),
+            )
+        )
+
+    points = store.history(hours=168)
+
+    assert 0 < len(points) <= 720
+    assert all(points[i].ts <= points[i + 1].ts for i in range(len(points) - 1))
+    # The last reading in the window survives -- "now" must stay accurate.
+    assert points[-1].utilization == float(2999 % 100)
+
+
+def test_downsampling_keeps_the_last_sample_in_each_slot(store):
+    """Last, not max: utilization resets to zero, and max would smear a
+    pre-reset peak across the drop and erase the sawtooth."""
+    now = datetime.now(UTC)
+    for minutes, value in ((30, 90.0), (20, 95.0), (10, 3.0)):
+        store.append_snapshot(
+            UsageSnapshot(
+                buckets=(Bucket("five_hour", "5h", value, None, "session"),),
+                fetched_at=now - timedelta(minutes=minutes),
+            )
+        )
+
+    points = store.history(hours=1, max_points=1)
+
+    assert [p.utilization for p in points] == [3.0]
+
+
 def test_an_empty_snapshot_writes_nothing(store):
     assert store.append_snapshot(parse_usage({})) == 0
 
@@ -209,6 +273,12 @@ def test_no_endpoint_leaks_the_token(client):
         assert "sk-ant" not in text
         assert "Authorization" not in text
         assert "accessToken" not in text
+
+
+def test_history_advertises_its_downsampling_cap(client):
+    body = client.get("/api/history?hours=168").json()
+
+    assert body["max_points_per_bucket"] == 720
 
 
 def test_history_groups_points_by_bucket(client):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,20 +27,34 @@ class Config:
         return cls(
             db_path=Path(os.environ.get("BURNRATE_DB", str(DEFAULT_DB_PATH))).expanduser(),
             host=os.environ.get("BURNRATE_HOST", DEFAULT_HOST),
-            port=_int_env("BURNRATE_PORT", DEFAULT_PORT),
-            poll_interval=_float_env("BURNRATE_POLL_INTERVAL", 60.0),
+            port=_int_env("BURNRATE_PORT", DEFAULT_PORT, 1, 65535),
+            poll_interval=_positive_float_env("BURNRATE_POLL_INTERVAL", 60.0),
         )
 
 
-def _int_env(name: str, default: int) -> int:
+def _int_env(name: str, default: int, lo: int, hi: int) -> int:
+    """An int from the environment, or the default if it is unusable."""
     try:
-        return int(os.environ[name])
+        value = int(os.environ[name])
     except (KeyError, ValueError):
         return default
+    return value if lo <= value <= hi else default
 
 
-def _float_env(name: str, default: float) -> float:
+def _positive_float_env(name: str, default: float) -> float:
+    """A strictly positive, finite float, or the default.
+
+    An unvalidated value here is not a cosmetic problem. Zero or a negative
+    interval leaves the poll loop with no wait at all, so it hammers the
+    endpoint continuously; nan and inf raise out of timedelta() inside the loop
+    body, outside any handler, and silently kill the background task after its
+    first poll. A typo in the plist must degrade to the default, not to either
+    of those.
+    """
     try:
-        return float(os.environ[name])
+        value = float(os.environ[name])
     except (KeyError, ValueError):
         return default
+    if not math.isfinite(value) or value <= 0:
+        return default
+    return value

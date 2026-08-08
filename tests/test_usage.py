@@ -75,6 +75,36 @@ def test_a_malformed_field_is_a_warning_not_a_notice():
     assert not any("resets_at" in n for n in snapshot.notices)
 
 
+def test_a_limits_entry_missing_its_reset_borrows_the_top_level_one(live_response):
+    """Regression: the top-level twin was skipped wholesale when limits[] had
+    already produced the bucket, so a limits entry with a percentage but a null
+    reset lost a perfectly good timestamp -- costing the gauge its countdown and
+    taking the weekly projection to unavailable."""
+    live_response["limits"][1]["resets_at"] = None
+
+    bucket = parse_usage(live_response).bucket("seven_day")
+
+    assert bucket.utilization == 14.0, "the richer limits percentage still wins"
+    assert bucket.resets_at is not None, "the top-level reset must fill the gap"
+    assert bucket.resets_at.isoformat().startswith("2026-08-15T16:00")
+
+
+def test_a_malformed_limits_reset_also_falls_back(live_response):
+    live_response["limits"][1]["resets_at"] = "whenever"
+
+    bucket = parse_usage(live_response).bucket("seven_day")
+
+    assert bucket.resets_at is not None
+
+
+def test_a_present_limits_reset_is_not_overwritten(live_response):
+    """weekly_scoped resets one second before weekly_all, so a blind overwrite
+    would quietly shift it."""
+    bucket = parse_usage(live_response).bucket("seven_day")
+
+    assert bucket.resets_at.second == 0
+
+
 def test_limits_wins_over_top_level_for_the_same_bucket(live_response):
     live_response["five_hour"]["utilization"] = 99.0
 

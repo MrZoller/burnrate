@@ -95,12 +95,13 @@ def project(bucket: Bucket | None, now: datetime | None = None) -> Projection:
         "elapsed_hours": elapsed_hours,
     }
 
-    if bucket.utilization >= 100.0:
+    # A reset that has already passed invalidates the whole reading, including a
+    # 100% one -- the period is over, so "cap reached" would describe a window
+    # that no longer exists. This must outrank AT_CAP, not follow it.
+    if now >= bucket.resets_at:
         return Projection(
-            status=AT_CAP,
-            message="Already at the cap for this period.",
-            hits_cap_at=now,
-            hours_to_cap=0.0,
+            status=UNAVAILABLE,
+            message="The reported reset time has already passed; waiting for a fresh reading.",
             **base,
         )
 
@@ -111,12 +112,12 @@ def project(bucket: Bucket | None, now: datetime | None = None) -> Projection:
             **base,
         )
 
-    if now >= bucket.resets_at:
-        # The reset we were handed is in the past; the next response should carry
-        # a fresh one. Projecting past it would be arithmetic on stale input.
+    if bucket.utilization >= 100.0:
         return Projection(
-            status=UNAVAILABLE,
-            message="The reported reset time has already passed; waiting for a fresh reading.",
+            status=AT_CAP,
+            message="Already at the cap for this period.",
+            hits_cap_at=now,
+            hours_to_cap=0.0,
             **base,
         )
 
