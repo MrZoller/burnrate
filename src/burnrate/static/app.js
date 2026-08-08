@@ -217,17 +217,34 @@ function tickCountdowns() {
 
 const CHART = { w: 760, h: 168, left: 36, right: 14, top: 12, bottom: 26 };
 
-function renderChart(series, windowStart, windowEnd) {
+function renderChart(series, windowStart, windowEnd, isCurrent) {
   const points = (series.points || [])
     .map((p) => ({ t: new Date(p.ts).getTime(), v: Number(p.utilization) }))
     .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.v))
     .sort((a, b) => a.t - b.t);
 
+  // History keeps a bucket for as long as it has samples in the window, so a
+  // bucket the API has stopped reporting still draws a series here after it has
+  // correctly disappeared from the gauges. Labelling its final reading "now"
+  // presented a value hours or days old as the live one -- the same failure the
+  // gauge path guards against, arriving through the other door. Only a bucket
+  // present in the current snapshot gets to say "now".
+  const newest = points.length ? points[points.length - 1] : null;
+  let nowText = "";
+  if (newest) {
+    nowText = isCurrent
+      ? `now ${pct(newest.v)}`
+      : `last ${pct(newest.v)} · ${formatAge((Date.now() - newest.t) / 1000)}`;
+  }
+
   const head = el("div", { class: "chart__head" }, [
     el("div", { class: "chart__title", text: series.label || series.key }),
     el("div", {
-      class: "chart__now",
-      text: points.length ? `now ${pct(points[points.length - 1].v)}` : "",
+      class: isCurrent ? "chart__now" : "chart__now chart__now--past",
+      text: nowText,
+      ...(newest && !isCurrent
+        ? { title: "No longer reported by the API; this is its last recorded value." }
+        : {}),
     }),
   ]);
 
@@ -588,13 +605,17 @@ async function refreshHistory() {
     const end = Date.now();
     const start = end - state.hours * 3600 * 1000;
     const order = new Map(state.buckets.map((b, i) => [b.key, i]));
+    // Keys the API is reporting right now. Empty when /api/now has never
+    // succeeded, which correctly makes every series read as historical rather
+    // than asserting currency we have no basis for.
+    const current = new Set(state.buckets.map((b) => b.key));
     const series = (data.series || []).sort(
       (a, b) => (order.get(a.key) ?? 99) - (order.get(b.key) ?? 99),
     );
 
     els.charts.replaceChildren(
       ...(series.length
-        ? series.map((s) => renderChart(s, start, end))
+        ? series.map((s) => renderChart(s, start, end, current.has(s.key)))
         : [
             el("div", { class: "chart" }, [
               el("div", {

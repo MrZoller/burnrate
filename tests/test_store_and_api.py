@@ -171,7 +171,12 @@ def test_history_is_downsampled_to_a_bounded_number_of_points(store):
 
 def test_downsampling_keeps_the_last_sample_in_each_slot(store):
     """Last, not max: utilization resets to zero, and max would smear a
-    pre-reset peak across the drop and erase the sawtooth."""
+    pre-reset peak across the drop and erase the sawtooth.
+
+    Also the case that used to depend on the wall clock: with epoch-aligned
+    slots these three samples landed in one slot or two according to where the
+    current hour happened to fall, so the assertion below held or failed by luck.
+    """
     now = datetime.now(UTC)
     for minutes, value in ((30, 90.0), (20, 95.0), (10, 3.0)):
         store.append_snapshot(
@@ -184,6 +189,64 @@ def test_downsampling_keeps_the_last_sample_in_each_slot(store):
     points = store.history(hours=1, max_points=1)
 
     assert [p.utilization for p in points] == [3.0]
+
+
+@pytest.mark.parametrize("max_points", [1, 2, 3, 7, 10, 60, 719, 720])
+def test_downsampling_never_exceeds_the_requested_cap(store, max_points):
+    """Regression: slots were aligned to Unix-epoch boundaries rather than to
+    the query's cutoff, so the requested window always overlapped one extra
+    slot and every one of these returned max_points + 1."""
+    now = datetime.now(UTC)
+    for i in range(180):
+        store.append_snapshot(
+            UsageSnapshot(
+                buckets=(
+                    Bucket("five_hour", "5h", float(i % 100), None, "session"),
+                    Bucket("seven_day", "Weekly", float(i % 50), None, "weekly"),
+                ),
+                fetched_at=now - timedelta(minutes=180 - i),
+            )
+        )
+
+    points = store.history(hours=3, max_points=max_points)
+    per_bucket: dict[str, int] = {}
+    for point in points:
+        per_bucket[point.bucket] = per_bucket.get(point.bucket, 0) + 1
+
+    assert per_bucket, "the window should not come back empty"
+    assert set(per_bucket) == {"five_hour", "seven_day"}
+    for bucket, count in per_bucket.items():
+        assert count <= max_points, f"{bucket} returned {count} points for a cap of {max_points}"
+
+
+def test_the_newest_sample_survives_every_cap(store):
+    """The point the chart labels "now". A cap that dropped it would put a stale
+    number under a current label."""
+    now = datetime.now(UTC)
+    for i in range(120):
+        store.append_snapshot(
+            UsageSnapshot(
+                buckets=(Bucket("five_hour", "5h", float(i), None, "session"),),
+                fetched_at=now - timedelta(minutes=120 - i),
+            )
+        )
+
+    for max_points in (1, 5, 720):
+        points = store.history(hours=3, max_points=max_points)
+        assert points[-1].utilization == 119.0
+
+
+def test_a_raw_body_can_be_archived_without_samples(store):
+    """The schema-break path: no buckets parsed, so nothing to write to samples,
+    but the body that broke the parser is the one worth keeping."""
+    store.append_raw({"unrecognizable": True}, ts=NOW)
+
+    with store._connect() as conn:
+        rows = conn.execute("SELECT ts, body FROM raw_snapshots").fetchall()
+
+    assert len(rows) == 1
+    assert "unrecognizable" in rows[0]["body"]
+    assert store.latest_per_bucket() == []
 
 
 def test_an_empty_snapshot_writes_nothing(store):

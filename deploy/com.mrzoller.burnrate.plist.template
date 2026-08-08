@@ -26,6 +26,8 @@
       <string>__HOST__</string>
       <key>BURNRATE_PORT</key>
       <string>__PORT__</string>
+      <key>BURNRATE_POLL_INTERVAL</key>
+      <string>__INTERVAL__</string>
       <key>PYTHONUNBUFFERED</key>
       <string>1</string>
     </dict>

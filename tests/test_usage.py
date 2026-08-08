@@ -75,6 +75,66 @@ def test_a_malformed_field_is_a_warning_not_a_notice():
     assert not any("resets_at" in n for n in snapshot.notices)
 
 
+@pytest.mark.parametrize("bad", ["not-a-number", [], {}, True, float("nan")])
+def test_an_unreadable_utilization_warns_even_beside_a_valid_bucket(bad):
+    """Regression: a non-null utilization the parser could not read was skipped
+    in silence. With one valid bucket left the snapshot was non-empty, so the
+    poll recorded success, the banner stayed dark, and the affected gauge just
+    disappeared -- a fail-quietly path in a dashboard whose whole posture is to
+    fail loudly."""
+    snapshot = parse_usage(
+        {
+            "five_hour": {"utilization": 12, "resets_at": None},
+            "seven_day": {"utilization": bad, "resets_at": None},
+        }
+    )
+
+    assert {b.key for b in snapshot.buckets} == {"five_hour"}
+    assert any("seven_day" in w for w in snapshot.warnings), snapshot.warnings
+
+
+def test_a_null_utilization_stays_quiet():
+    """The other half of the same rule. Nulls are how this endpoint says "no
+    limit of this kind" and they are on most responses, so warning about them
+    would leave the banner permanently lit."""
+    snapshot = parse_usage(
+        {
+            "five_hour": {"utilization": 12, "resets_at": None},
+            "seven_day_opus": {"utilization": None, "resets_at": None},
+        }
+    )
+
+    assert {b.key for b in snapshot.buckets} == {"five_hour"}
+    assert snapshot.warnings == ()
+
+
+def test_an_unreadable_percent_in_limits_also_warns():
+    """limits[] is the primary source, so the same silent skip there hides a
+    bucket the dashboard is built around."""
+    snapshot = parse_usage(
+        {
+            "limits": [
+                {"kind": "session", "percent": 40, "resets_at": None},
+                {"kind": "weekly_all", "percent": "?", "resets_at": None},
+            ]
+        }
+    )
+
+    assert {b.key for b in snapshot.buckets} == {"five_hour"}
+    assert any("limits[1]" in w for w in snapshot.warnings), snapshot.warnings
+
+
+def test_a_null_percent_falling_back_to_utilization_is_not_a_warning():
+    """Both fields are read, so a null `percent` next to a usable `utilization`
+    is a successful parse, not drift."""
+    snapshot = parse_usage(
+        {"limits": [{"kind": "session", "percent": None, "utilization": 33, "resets_at": None}]}
+    )
+
+    assert snapshot.bucket("five_hour").utilization == 33.0
+    assert snapshot.warnings == ()
+
+
 def test_a_limits_entry_missing_its_reset_borrows_the_top_level_one(live_response):
     """Regression: the top-level twin was skipped wholesale when limits[] had
     already produced the bucket, so a limits entry with a percentage but a null

@@ -392,6 +392,13 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* A bucket the API no longer reports. The label already spells out the age in
+   words, so this only reinforces it -- never carries the meaning alone. */
+.chart__now--past {
+  font-style: italic;
+  opacity: 0.75;
+}
+
 .chart svg {
   display: block;
   width: 100%;

@@ -136,12 +136,12 @@ def _collect_from_limits(limits: Any, buckets: dict[str, Bucket], warnings: list
             warnings.append(f"limits[{index}] was {type(entry).__name__}, expected an object")
             continue
 
-        utilization = _as_percent(entry.get("percent"))
+        utilization, percent_warning = _read_percent(entry, "percent", "utilization")
         if utilization is None:
-            utilization = _as_percent(entry.get("utilization"))
-        if utilization is None:
-            # An entry with no usable number is not worth a warning on its own;
-            # nulls are routine here.
+            # A missing or null number is routine and stays quiet. A number that
+            # was there and could not be read is drift, and says so.
+            if percent_warning:
+                warnings.append(f"limits[{index}]: {percent_warning}")
             continue
 
         kind = entry.get("kind") if isinstance(entry.get("kind"), str) else None
@@ -178,8 +178,15 @@ def _collect_from_top_level(
         if key in NON_BUCKET_KEYS or not isinstance(value, dict):
             continue
 
-        utilization = _as_percent(value.get("utilization"))
+        utilization, percent_warning = _read_percent(value, "utilization")
         if utilization is None:
+            # Same split as the limits path: null is how this endpoint says "no
+            # limit of this kind", but a non-null value we cannot read means the
+            # gauge disappears, and it must not disappear quietly. Without the
+            # warning a malformed bucket sitting beside one valid bucket left the
+            # poll marked successful, the banner dark, and one gauge simply gone.
+            if percent_warning:
+                warnings.append(f"{key}: {percent_warning}")
             continue
         resets_at, reset_warning = _parse_timestamp(value.get("resets_at"))
         if reset_warning:
@@ -256,6 +263,25 @@ def _scope_model_name(scope: Any) -> str | None:
         if isinstance(candidate, str) and candidate.strip():
             return candidate.strip()
     return None
+
+
+def _read_percent(container: dict[str, Any], *names: str) -> tuple[float | None, str | None]:
+    """First readable percentage among `names`. Returns (value, warning).
+
+    The distinction `_as_percent` alone cannot make: it answers None both for a
+    field that was absent or null -- routine, this endpoint nulls out limits that
+    do not apply -- and for one that was present and unreadable, which is schema
+    drift. Collapsing the two is how a malformed bucket vanished silently.
+    """
+    present = [(name, container.get(name)) for name in names if container.get(name) is not None]
+    if not present:
+        return None, None
+    for _, raw in present:
+        value = _as_percent(raw)
+        if value is not None:
+            return value, None
+    name, raw = present[0]
+    return None, f"unreadable {name} {raw!r}"
 
 
 def _as_percent(raw: Any) -> float | None:

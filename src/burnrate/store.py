@@ -145,6 +145,19 @@ class Store:
 
         conn.execute("INSERT INTO raw_snapshots (ts, body) VALUES (?, ?)", (_iso(ts), body))
 
+    def append_raw(self, raw_body: Any, ts: datetime | None = None) -> None:
+        """Archive a response body with no samples attached.
+
+        `append_snapshot` records the body next to the samples it produced, which
+        covers every readable response and none of the unreadable ones -- a
+        schema break yields no buckets, so that path writes nothing at all. That
+        inverts the archive's whole purpose: the one response worth keeping is
+        the one that broke, and it was the only one being dropped. Hence a second
+        door in.
+        """
+        with self._connect() as conn:
+            self._append_raw_if_changed(conn, ts or datetime.now(UTC), raw_body)
+
     def latest_per_bucket(self) -> list[Sample]:
         """Every bucket from the most recent snapshot -- and nothing else.
 
@@ -178,9 +191,20 @@ class Store:
         function that resets to zero, so the final reading in a slot is what was
         actually true at that time, where max would smear a pre-reset peak
         across the drop and erase the sawtooth the 5-hour bucket is made of.
+
+        Slots are anchored to the query's own cutoff, not to Unix-epoch
+        boundaries. Epoch-aligned slots are the same width but sit at an
+        arbitrary offset inside the requested window, so the window overlaps one
+        extra slot and the cap is exceeded by one -- measured at every
+        max_points tried, not just at unlucky ones. It also made the count
+        depend on the wall-clock minute the query ran, which is not something a
+        test can pin down. The clamp closes the remaining boundary case, where a
+        sample landing on the final instant of the window would otherwise earn a
+        slot of its own.
         """
         cutoff = datetime.now(UTC) - timedelta(hours=hours)
-        slot_seconds = max(1.0, (hours * 3600.0) / max(1, max_points))
+        slots = max(1, max_points)
+        slot_seconds = max(1.0, (hours * 3600.0) / slots)
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -189,11 +213,20 @@ class Store:
                 WHERE id IN (
                     SELECT MAX(id) FROM samples
                     WHERE ts >= ?
-                    GROUP BY bucket, CAST(strftime('%s', ts) / ? AS INTEGER)
+                    GROUP BY bucket, MIN(
+                        -- COALESCE, because strftime yields NULL on a timestamp
+                        -- it cannot parse and a NULL group would be one more
+                        -- slot than the cap allows.
+                        COALESCE(
+                            CAST((CAST(strftime('%s', ts) AS INTEGER) - ?) / ? AS INTEGER),
+                            0
+                        ),
+                        ?
+                    )
                 )
                 ORDER BY ts ASC
                 """,
-                (_iso(cutoff), slot_seconds),
+                (_iso(cutoff), int(cutoff.timestamp()), slot_seconds, slots - 1),
             ).fetchall()
         return [_row_to_sample(row) for row in rows]
 

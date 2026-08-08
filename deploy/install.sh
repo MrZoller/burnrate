@@ -15,6 +15,11 @@ LOG="$HOME/Library/Logs/burnrate.log"
 HOST="${BURNRATE_HOST:-0.0.0.0}"
 PORT="${BURNRATE_PORT:-8377}"
 DB="${BURNRATE_DB:-$HOME/.local/share/burnrate/burnrate.db}"
+# launchd starts the agent with none of this shell's environment, so anything not
+# baked into the plist is simply absent at runtime. The README documents all four
+# of these as install-time overrides; the interval was the one not being captured,
+# so setting it did nothing and the agent quietly polled at the 60s default.
+INTERVAL="${BURNRATE_POLL_INTERVAL:-60}"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 
@@ -45,6 +50,7 @@ sed \
   -e "s|__DB__|$DB|g" \
   -e "s|__HOST__|$HOST|g" \
   -e "s|__PORT__|$PORT|g" \
+  -e "s|__INTERVAL__|$INTERVAL|g" \
   -e "s|__LOG__|$LOG|g" \
   "$PLIST_SRC" > "$PLIST_DST"
 
@@ -56,6 +62,7 @@ launchctl enable "gui/$UID/$LABEL"
 printf '\nInstalled %s\n' "$LABEL"
 printf '  plist : %s\n' "$PLIST_DST"
 printf '  db    : %s\n' "$DB"
+printf '  poll  : every %ss\n' "$INTERVAL"
 printf '  log   : %s\n' "$LOG"
 printf '  url   : http://%s:%s/\n' "$(hostname -s)" "$PORT"
 

@@ -152,7 +152,11 @@ class Poller:
 
         snapshot = parse_usage(payload, fetched_at=now)
         if not snapshot.buckets:
-            # A 200 we cannot read is a schema break, not a success.
+            # A 200 we cannot read is a schema break, not a success. Archive the
+            # body on the way past: this is precisely the response the raw
+            # archive exists for, and it is the only kind that never reached it,
+            # since the sample-writing path below is what normally records one.
+            self._archive_unreadable(payload, now)
             self._record_failure(
                 "schema",
                 "; ".join(snapshot.warnings) or "response contained no usable buckets",
@@ -183,6 +187,19 @@ class Poller:
                 logger.exception("prune failed")
 
         return snapshot
+
+    def _archive_unreadable(self, payload: Any, ts: datetime) -> None:
+        """Keep the body that broke the parser, without letting that failure win.
+
+        Swallowed on purpose, and separately from the store failure the sample
+        path reports: the caller is already on its way to recording a schema
+        break, and losing the archive copy must not overwrite that diagnosis with
+        a less useful one about the database.
+        """
+        try:
+            self.store.append_raw(payload, ts=ts)
+        except Exception:  # noqa: BLE001 - archiving is best-effort by design
+            logger.exception("failed to archive the unreadable response body")
 
     async def _fetch_with_one_auth_retry(self) -> Any:
         """Fetch, and on 401 re-read the credential once before giving up.

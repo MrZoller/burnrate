@@ -125,6 +125,40 @@ async def test_a_200_with_an_unreadable_body_counts_as_failure_not_success(store
     assert store.latest_per_bucket() == []
 
 
+async def test_the_body_that_broke_the_parser_is_archived(store, monkeypatch):
+    """Regression: the raw archive exists to make an endpoint change diagnosable
+    after the fact, and the schema break was the one response it never captured
+    -- this path returned before the sample write that normally records one."""
+    _credentials(monkeypatch, "tok")
+    _fetches(monkeypatch, lambda token, n: {"something": "entirely new"})
+    poller = Poller(store)
+
+    await poller.poll_once()
+
+    with store._connect() as conn:
+        bodies = [row["body"] for row in conn.execute("SELECT body FROM raw_snapshots")]
+
+    assert len(bodies) == 1
+    assert "entirely new" in bodies[0]
+
+
+async def test_a_failed_archive_does_not_replace_the_schema_diagnosis(store, monkeypatch):
+    """Losing the archive copy is a footnote; the reported error must still be
+    the schema break, not a database complaint about storing it."""
+    _credentials(monkeypatch, "tok")
+    _fetches(monkeypatch, lambda token, n: {"something": "entirely new"})
+    poller = Poller(store)
+
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "append_raw", boom)
+
+    assert await poller.poll_once() is None
+    assert poller.status.last_error_kind == "schema"
+    assert poller.status.consecutive_failures == 1
+
+
 @pytest.mark.parametrize(
     ("error", "kind"),
     [
