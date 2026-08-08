@@ -21,6 +21,7 @@ could not interpret surfaces in the UI as drift rather than vanishing.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -175,7 +176,18 @@ def _collect_from_top_level(
     notices: list[str],
 ) -> None:
     for key, value in payload.items():
-        if key in NON_BUCKET_KEYS or not isinstance(value, dict):
+        if key in NON_BUCKET_KEYS:
+            continue
+        if not isinstance(value, dict):
+            # A bucket we know by name turning into a scalar or a list is drift,
+            # and it reaches here before the utilization check ever runs, so the
+            # malformed-number warning cannot catch it. Scoped to KNOWN_LABELS on
+            # purpose: null is how this endpoint disables a limit and most of
+            # these keys are null on any given response, while the unrecognized
+            # ones come and go -- warning on those would light the banner for
+            # fields the dashboard never renders.
+            if key in KNOWN_LABELS and value is not None:
+                warnings.append(f"{key} was {type(value).__name__}, expected an object")
             continue
 
         utilization, percent_warning = _read_percent(value, "utilization")
@@ -297,7 +309,12 @@ def _as_percent(raw: Any) -> float | None:
             return None
     else:
         return None
-    if value != value:  # NaN
+    # Finite, not merely non-NaN. An infinity survives float() -- from a literal
+    # Infinity or from an overflowing string like "1e999" -- and the clamp below
+    # then turns it into a confident 100% or 0%. At 100% the projection reports
+    # "already at the cap", which is the worst output this dashboard can produce:
+    # a wrong number with no warning attached to it.
+    if not math.isfinite(value):
         return None
     # Clamp rather than reject: an over-100 reading still means "at the cap".
     return max(0.0, min(100.0, value))

@@ -217,7 +217,8 @@ function tickCountdowns() {
 
 const CHART = { w: 760, h: 168, left: 36, right: 14, top: 12, bottom: 26 };
 
-function renderChart(series, windowStart, windowEnd, isCurrent) {
+function renderChart(series, windowStart, windowEnd, currency = {}) {
+  const { isCurrent = false, note = "" } = currency;
   const points = (series.points || [])
     .map((p) => ({ t: new Date(p.ts).getTime(), v: Number(p.utilization) }))
     .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.v))
@@ -242,9 +243,7 @@ function renderChart(series, windowStart, windowEnd, isCurrent) {
     el("div", {
       class: isCurrent ? "chart__now" : "chart__now chart__now--past",
       text: nowText,
-      ...(newest && !isCurrent
-        ? { title: "No longer reported by the API; this is its last recorded value." }
-        : {}),
+      ...(newest && !isCurrent && note ? { title: note } : {}),
     }),
   ]);
 
@@ -609,13 +608,30 @@ async function refreshHistory() {
     // succeeded, which correctly makes every series read as historical rather
     // than asserting currency we have no basis for.
     const current = new Set(state.buckets.map((b) => b.key));
+    // Membership alone is not enough. A stale snapshot still reports its last
+    // known buckets -- that is deliberate, so a restart shows real numbers -- so
+    // every one of those keys would pass the membership test while the readings
+    // behind them are hours or days old. Restore an old database and the whole
+    // dashboard would have said "now" over three-day-old values. The banner
+    // warning about it is not a licence for the series labels to disagree.
+    const snapshotIsCurrent = Boolean(state.now) && !state.now.stale;
     const series = (data.series || []).sort(
       (a, b) => (order.get(a.key) ?? 99) - (order.get(b.key) ?? 99),
     );
 
     els.charts.replaceChildren(
       ...(series.length
-        ? series.map((s) => renderChart(s, start, end, current.has(s.key)))
+        ? series.map((s) =>
+            renderChart(s, start, end, {
+              isCurrent: snapshotIsCurrent && current.has(s.key),
+              // Two different reasons a label cannot say "now", and a reader
+              // needs to know which: the bucket is gone, or the whole snapshot
+              // is behind.
+              note: current.has(s.key)
+                ? "The latest reading is stale, so this is the last value recorded rather than a current one."
+                : "No longer reported by the API; this is its last recorded value.",
+            }),
+          )
         : [
             el("div", { class: "chart" }, [
               el("div", {

@@ -124,6 +124,57 @@ def test_an_unreadable_percent_in_limits_also_warns():
     assert any("limits[1]" in w for w in snapshot.warnings), snapshot.warnings
 
 
+@pytest.mark.parametrize("raw", ["1e999", "-1e999", float("inf"), float("-inf")])
+def test_an_infinite_utilization_is_rejected_not_clamped_to_the_cap(raw):
+    """The worst output this dashboard can produce: '1e999' cleared the NaN check,
+    clamped to 100.0, drew a full gauge with no warning, and drove the hero panel
+    to "Already at the cap for this period." A wrong number, stated confidently."""
+    snapshot = parse_usage({"seven_day": {"utilization": raw, "resets_at": None}})
+
+    assert snapshot.weekly_primary is None
+    assert any("seven_day" in w for w in snapshot.warnings), snapshot.warnings
+
+
+def test_a_known_bucket_that_stops_being_an_object_warns():
+    """Caught before the utilization check runs, so the malformed-number warning
+    never saw it: the bucket vanished with the banner dark."""
+    snapshot = parse_usage(
+        {
+            "five_hour": {"utilization": 12, "resets_at": None},
+            "seven_day": 42,
+        }
+    )
+
+    assert {b.key for b in snapshot.buckets} == {"five_hour"}
+    assert any("seven_day" in w and "int" in w for w in snapshot.warnings), snapshot.warnings
+
+
+@pytest.mark.parametrize("shape", [42, "high", [], True])
+def test_an_unrecognized_key_of_the_wrong_shape_stays_quiet(shape):
+    """Scoped to buckets we know by name on purpose. These keys come and go in
+    the real response, and warning about them would light the banner for fields
+    the dashboard never renders -- the failure mode notices exist to avoid."""
+    snapshot = parse_usage(
+        {"five_hour": {"utilization": 12, "resets_at": None}, "iguana_necktie": shape}
+    )
+
+    assert snapshot.warnings == ()
+
+
+def test_a_null_known_bucket_is_still_silent():
+    """Null is how the endpoint says "no limit of this kind", and most responses
+    carry several. This must not become a warning."""
+    snapshot = parse_usage(
+        {
+            "five_hour": {"utilization": 12, "resets_at": None},
+            "seven_day_opus": None,
+            "seven_day_sonnet": None,
+        }
+    )
+
+    assert snapshot.warnings == ()
+
+
 def test_a_null_percent_falling_back_to_utilization_is_not_a_warning():
     """Both fields are read, so a null `percent` next to a usable `utilization`
     is a successful parse, not drift."""
