@@ -68,6 +68,11 @@ function formatAge(seconds) {
   return `${formatDuration(seconds)} ago`;
 }
 
+/** Phrasing for "how old is this reading" that still reads when there is none. */
+function describeAge(seconds) {
+  return seconds == null ? "no successful reading yet" : `last read ${formatAge(seconds)}`;
+}
+
 function formatClock(iso) {
   if (!iso) return "—";
   const date = new Date(iso);
@@ -397,9 +402,21 @@ function attachHover(svg, ctx) {
     ctx.marker.setAttribute("cy", py);
     ctx.marker.setAttribute("opacity", "1");
 
-    els.tooltip.innerHTML = `<b>${pct(nearest.v)}</b> <span>· ${ctx.series.label}</span><br><span>${new Date(
-      nearest.t,
-    ).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" })}</span>`;
+    // Built as nodes, not markup: the label comes from the response body
+    // (scope.model.display_name, or a raw JSON key) and is not ours to trust.
+    els.tooltip.replaceChildren(
+      el("b", { text: pct(nearest.v) }),
+      document.createTextNode(" "),
+      el("span", { text: `· ${ctx.series.label}` }),
+      el("br"),
+      el("span", {
+        text: new Date(nearest.t).toLocaleString(undefined, {
+          weekday: "short",
+          hour: "numeric",
+          minute: "2-digit",
+        }),
+      }),
+    );
     els.tooltip.hidden = false;
     const tip = els.tooltip.getBoundingClientRect();
     const left = clamp(event.clientX + 14, 8, window.innerWidth - tip.width - 8);
@@ -474,7 +491,7 @@ function renderBanner(data, fetchError) {
     show(
       status.consecutive_failures > 2 ? "error" : "warn",
       `Usage fetch failing (${status.consecutive_failures}×)`,
-      `${status.last_error} — showing the last good reading from ${formatAge(age)}.`,
+      `${status.last_error} — ${describeAge(age)}.`,
     );
     els.dot.dataset.state = status.consecutive_failures > 2 ? "error" : "stale";
     return;
@@ -484,7 +501,7 @@ function renderBanner(data, fetchError) {
     show(
       "warn",
       "Data may be stale",
-      `Last successful reading ${formatAge(age)}, past the ${Math.round(
+      `${describeAge(age)[0].toUpperCase()}${describeAge(age).slice(1)}, past the ${Math.round(
         data.stale_after_seconds,
       )}s freshness window.`,
     );
@@ -544,7 +561,10 @@ async function refresh({ history = true } = {}) {
     renderTable(state.buckets);
     renderHero(data.projection, state.buckets.find((b) => b.key === "seven_day"));
 
-    els.freshness.textContent = `Updated ${formatAge(data.staleness_seconds)}`;
+    els.freshness.textContent =
+      data.staleness_seconds == null
+        ? "No reading yet"
+        : `Updated ${formatAge(data.staleness_seconds)}`;
     els.footerMeta.textContent = [
       `Credential source: ${data.status?.credential_source ?? "unknown"}`,
       `poll every ${Math.round(data.poll_interval_seconds)}s`,
