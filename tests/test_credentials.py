@@ -271,6 +271,19 @@ def test_both_sources_failing_reports_both_reasons(monkeypatch, tmp_path):
     assert "file" in str(excinfo.value)
 
 
+def test_repr_never_exposes_the_token():
+    """A frozen dataclass prints every field by default, so any f-string,
+    logger call, or traceback rendering locals would leak the secret."""
+    credential = credentials.Credential(TOKEN, "file")
+
+    assert TOKEN not in repr(credential)
+    assert TOKEN not in f"{credential}"
+    assert TOKEN not in str(RuntimeError(f"failed: {credential}"))
+    # The source is still diagnosable, and the token is still readable.
+    assert "file" in repr(credential)
+    assert credential.access_token == TOKEN
+
+
 def test_expiry_is_advisory_only(monkeypatch):
     past = credentials.Credential(TOKEN, "file", datetime(2000, 1, 1, tzinfo=UTC))
     unknown = credentials.Credential(TOKEN, "file", None)

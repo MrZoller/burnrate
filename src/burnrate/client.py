@@ -7,9 +7,15 @@ churn (protocol). Nothing here logs or embeds the token.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import httpx
+
+# Anything shaped like an Anthropic credential, redacted from diagnostics even
+# when we did not put it there.
+_SECRET_PATTERN = re.compile(r"sk-ant-[A-Za-z0-9_\-]+")
+REDACTED = "<redacted>"
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 OAUTH_BETA = "oauth-2025-04-20"
@@ -68,7 +74,7 @@ async def fetch_usage(
         if response.status_code in (401, 403):
             raise UsageAuthError(f"HTTP {response.status_code}")
         if response.status_code >= 400:
-            raise UsageHTTPError(response.status_code, _short_body(response))
+            raise UsageHTTPError(response.status_code, _short_body(response, access_token))
 
         try:
             return response.json()
@@ -79,9 +85,18 @@ async def fetch_usage(
             await client.aclose()
 
 
-def _short_body(response: httpx.Response) -> str:
-    """A trimmed body excerpt for diagnostics. Never includes request headers."""
+def _short_body(response: httpx.Response, secret: str = "") -> str:
+    """A trimmed body excerpt for diagnostics, with credentials stripped.
+
+    This text ends up in PollerStatus.last_error, which /api/now serves to the
+    browser and the logger writes to disk. An upstream that echoes the token
+    back in an error body would otherwise leak it into both, so the excerpt is
+    scrubbed of the token we sent and of anything else credential-shaped.
+    """
     try:
-        return response.text[:200].replace("\n", " ").strip()
+        excerpt = response.text[:200].replace("\n", " ").strip()
     except Exception:  # pragma: no cover - defensive
         return ""
+    if secret:
+        excerpt = excerpt.replace(secret, REDACTED)
+    return _SECRET_PATTERN.sub(REDACTED, excerpt)

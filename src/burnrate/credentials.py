@@ -16,7 +16,7 @@ import getpass
 import json
 import os
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -35,9 +35,16 @@ class CredentialError(RuntimeError):
 
 @dataclass(frozen=True)
 class Credential:
-    """An access token plus where it came from. Never log or serialize this."""
+    """An access token plus where it came from.
 
-    access_token: str
+    `access_token` is excluded from the generated repr. A frozen dataclass would
+    otherwise print the secret in cleartext from any f-string, `logger.debug`,
+    or traceback that renders locals -- which is exactly the guarantee the
+    module docstring makes, so it is enforced here rather than left to
+    discipline.
+    """
+
+    access_token: str = field(repr=False)
     source: str
     expires_at: datetime | None = None
 
