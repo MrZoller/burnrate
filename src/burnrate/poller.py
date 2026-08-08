@@ -116,14 +116,21 @@ class Poller:
 
             await self.poll_once()
 
-            if self.status.consecutive_failures:
-                delay = min(
-                    self.interval * (BACKOFF_FACTOR ** (self.status.consecutive_failures - 1)),
-                    MAX_BACKOFF_SECONDS,
-                )
-            else:
-                delay = self.interval
+            delay = self.next_delay()
             self.status.next_attempt_at = datetime.now(UTC) + timedelta(seconds=delay)
+
+    def next_delay(self) -> float:
+        """Seconds to wait before the next attempt.
+
+        Steady state is the poll interval; each consecutive failure doubles it up
+        to a ceiling, so a broken endpoint costs one request every few minutes
+        rather than one a minute forever. Lives on its own so the loop's timing
+        can be asserted directly instead of re-derived by a test.
+        """
+        failures = self.status.consecutive_failures
+        if not failures:
+            return self.interval
+        return min(self.interval * (BACKOFF_FACTOR ** (failures - 1)), MAX_BACKOFF_SECONDS)
 
     async def poll_once(self) -> UsageSnapshot | None:
         """One fetch/parse/store cycle. Records outcome in `status`; never raises."""

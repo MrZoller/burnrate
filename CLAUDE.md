@@ -4,7 +4,8 @@ Self-hosted web dashboard for Claude Max plan usage.
 
 ## Commands
 - Test: `uv run pytest`
-- Run: `uv run uvicorn burnrate.app:app --host 0.0.0.0 --port 8377`
+- Run: `uv run burnrate` (or `uv run uvicorn burnrate.app:create_app --factory
+  --host 0.0.0.0 --port 8377`)
 - Lint/format: `uv run ruff check . && uv run ruff format .`
 
 ## Stack

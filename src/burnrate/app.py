@@ -2,6 +2,12 @@
 
 The OAuth token lives entirely on this side. Nothing in any response below
 carries it, and the browser never talks to api.anthropic.com.
+
+There is deliberately no module-level `app`. Building one at import time makes
+`import burnrate.app` create a database and a poller as a side effect, which
+polluted $HOME on every test run. Serve it as a factory instead:
+
+    uvicorn burnrate.app:create_app --factory
 """
 
 from __future__ import annotations
@@ -21,7 +27,7 @@ from .config import STALE_AFTER_SECONDS, Config
 from .poller import Poller
 from .projection import Projection, project
 from .store import Sample, Store
-from .usage import Bucket, UsageSnapshot
+from .usage import KNOWN_LABELS, Bucket, UsageSnapshot, group_for, humanize
 
 logger = logging.getLogger("burnrate")
 
@@ -122,8 +128,6 @@ def _current_buckets(poller: Poller, store: Store) -> list[Bucket]:
 
 
 def _sample_to_bucket(sample: Sample) -> Bucket:
-    from .usage import KNOWN_LABELS, group_for, humanize
-
     return Bucket(
         key=sample.bucket,
         label=sample.label or KNOWN_LABELS.get(sample.bucket) or humanize(sample.bucket),
@@ -178,6 +182,3 @@ def _to_series(samples: list[Sample]) -> list[dict[str, Any]]:
 
 def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
-
-
-app = create_app()

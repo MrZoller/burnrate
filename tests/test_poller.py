@@ -1,5 +1,6 @@
 """Poll-loop behavior: the 401 re-read, backoff, and failing loudly."""
 
+import asyncio
 from datetime import UTC, datetime
 
 import pytest
@@ -7,7 +8,7 @@ import pytest
 from burnrate import poller as poller_module
 from burnrate.client import UsageAuthError, UsageHTTPError, UsageTransportError
 from burnrate.credentials import Credential, CredentialError
-from burnrate.poller import BACKOFF_FACTOR, MAX_BACKOFF_SECONDS, Poller
+from burnrate.poller import MAX_BACKOFF_SECONDS, Poller
 from burnrate.store import Store
 
 
@@ -167,16 +168,86 @@ async def test_failures_accumulate_and_a_success_resets_them(store, monkeypatch,
     assert poller.status.healthy
 
 
-def test_backoff_grows_exponentially_and_is_capped():
-    interval = 60.0
+def test_steady_state_waits_one_interval(store):
+    poller = Poller(store, interval=60.0)
 
-    def delay(failures):
-        return min(interval * (BACKOFF_FACTOR ** (failures - 1)), MAX_BACKOFF_SECONDS)
+    assert poller.status.consecutive_failures == 0
+    assert poller.next_delay() == 60.0
 
-    assert delay(1) == 60
-    assert delay(2) == 120
-    assert delay(3) == 240
-    assert delay(20) == MAX_BACKOFF_SECONDS
+
+@pytest.mark.parametrize(
+    ("failures", "expected"),
+    [(1, 60.0), (2, 120.0), (3, 240.0), (4, 480.0), (20, MAX_BACKOFF_SECONDS)],
+)
+def test_backoff_doubles_per_failure_and_is_capped(store, failures, expected):
+    poller = Poller(store, interval=60.0)
+    poller.status.consecutive_failures = failures
+
+    assert poller.next_delay() == expected
+
+
+def test_backoff_honours_a_custom_interval(store):
+    poller = Poller(store, interval=5.0)
+    poller.status.consecutive_failures = 3
+
+    assert poller.next_delay() == 20.0
+
+
+async def test_the_loop_backs_off_after_a_failure(store, monkeypatch, live_response):
+    """Exercises _run itself, not a re-derivation of its arithmetic."""
+    _credentials(monkeypatch, "tok")
+    waits: list[float] = []
+    outcome = {"fail": True}
+
+    def handler(token, n):
+        if outcome["fail"]:
+            raise UsageTransportError("nope")
+        return live_response
+
+    _fetches(monkeypatch, handler)
+    poller = Poller(store, interval=60.0)
+
+    async def fake_wait_for(awaitable, timeout):
+        waits.append(timeout)
+        awaitable.close()
+        if len(waits) >= 3:
+            poller._stopping.set()
+            return True
+        if len(waits) == 2:
+            outcome["fail"] = False
+        raise TimeoutError
+
+    monkeypatch.setattr(poller_module.asyncio, "wait_for", fake_wait_for)
+    await poller._run()
+
+    # First failure -> 60s, second failure -> 120s, then a success drops it back.
+    assert waits[:3] == [60.0, 120.0, 60.0]
+
+
+async def test_the_loop_polls_then_stops_cleanly(store, monkeypatch, live_response):
+    _credentials(monkeypatch, "tok")
+    _fetches(monkeypatch, lambda token, n: live_response)
+    poller = Poller(store, interval=0.01)
+
+    await poller.start()
+    for _ in range(200):  # let at least one poll land
+        if poller.status.last_success_at is not None:
+            break
+        await asyncio.sleep(0.005)
+    await poller.stop()
+
+    assert poller.status.last_success_at is not None
+    assert poller._task is None
+    assert store.latest_per_bucket(), "the loop must persist what it fetched"
+
+
+async def test_stop_is_safe_before_start_and_twice(store):
+    poller = Poller(store)
+
+    await poller.stop()
+    await poller.stop()
+
+    assert poller._task is None
 
 
 async def test_staleness_is_measured_from_the_last_success(store, monkeypatch, live_response):
