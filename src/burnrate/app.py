@@ -130,7 +130,7 @@ def _sample_to_bucket(sample: Sample) -> Bucket:
         utilization=sample.utilization,
         resets_at=sample.resets_at,
         group=group_for(None, sample.bucket),
-        known=sample.bucket in KNOWN_LABELS,
+        known=sample.known,
         source="store",
     )
 

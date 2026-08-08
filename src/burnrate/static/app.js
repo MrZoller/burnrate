@@ -492,6 +492,9 @@ function renderBanner(data, fetchError) {
     return;
   }
 
+  // Only genuine anomalies reach the banner. Routine drift -- an unrecognized
+  // bucket -- arrives as a notice and is already visible on its own dashed
+  // card, so it stays out of the banner and off the footer's critical path.
   if (status.warnings?.length) {
     show(
       "warn",
@@ -545,6 +548,7 @@ async function refresh({ history = true } = {}) {
     els.footerMeta.textContent = [
       `Credential source: ${data.status?.credential_source ?? "unknown"}`,
       `poll every ${Math.round(data.poll_interval_seconds)}s`,
+      ...(data.status?.notices?.length ? [`${data.status.notices.length} unrecognized bucket(s)`] : []),
     ].join(" · ");
 
     if (history) await refreshHistory();

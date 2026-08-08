@@ -50,13 +50,29 @@ def test_non_bucket_sections_never_become_gauges(live_response):
     assert "spend" not in keys
 
 
-def test_unknown_bucket_is_surfaced_with_a_warning_not_hidden(live_response):
+def test_unknown_bucket_is_surfaced_as_a_notice_not_hidden(live_response):
     snapshot = parse_usage(live_response)
     bucket = snapshot.bucket("nimbus_quill")
 
     assert bucket is not None, "drift must be visible, never silently dropped"
     assert bucket.known is False
-    assert any("nimbus_quill" in w for w in snapshot.warnings)
+    assert any("nimbus_quill" in n for n in snapshot.notices)
+
+
+def test_an_unrecognized_bucket_does_not_raise_a_warning(live_response):
+    """nimbus_quill is a permanent fixture of the response. Routing it to the
+    banner would leave it lit forever and devalue the one signal that matters."""
+    snapshot = parse_usage(live_response)
+
+    assert snapshot.warnings == ()
+    assert snapshot.notices != ()
+
+
+def test_a_malformed_field_is_a_warning_not_a_notice():
+    snapshot = parse_usage({"five_hour": {"utilization": 10, "resets_at": 12345}})
+
+    assert snapshot.warnings, "a broken field is a real anomaly"
+    assert not any("resets_at" in n for n in snapshot.notices)
 
 
 def test_limits_wins_over_top_level_for_the_same_bucket(live_response):

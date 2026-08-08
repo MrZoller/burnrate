@@ -85,6 +85,7 @@ class UsageSnapshot:
 
     buckets: tuple[Bucket, ...] = ()
     warnings: tuple[str, ...] = field(default=())
+    notices: tuple[str, ...] = field(default=())
     fetched_at: datetime | None = None
 
     def bucket(self, key: str) -> Bucket | None:
@@ -106,15 +107,21 @@ def parse_usage(payload: Any, fetched_at: datetime | None = None) -> UsageSnapsh
 
     buckets: dict[str, Bucket] = {}
     warnings: list[str] = []
+    notices: list[str] = []
 
     _collect_from_limits(payload.get("limits"), buckets, warnings)
-    _collect_from_top_level(payload, buckets, warnings)
+    _collect_from_top_level(payload, buckets, warnings, notices)
 
     if not buckets:
         warnings.append("no usable buckets in response")
 
     ordered = tuple(sorted(buckets.values(), key=lambda b: b.sort_key))
-    return UsageSnapshot(buckets=ordered, warnings=tuple(warnings), fetched_at=fetched_at)
+    return UsageSnapshot(
+        buckets=ordered,
+        warnings=tuple(warnings),
+        notices=tuple(notices),
+        fetched_at=fetched_at,
+    )
 
 
 def _collect_from_limits(limits: Any, buckets: dict[str, Bucket], warnings: list[str]) -> None:
@@ -162,7 +169,10 @@ def _collect_from_limits(limits: Any, buckets: dict[str, Bucket], warnings: list
 
 
 def _collect_from_top_level(
-    payload: dict[str, Any], buckets: dict[str, Bucket], warnings: list[str]
+    payload: dict[str, Any],
+    buckets: dict[str, Bucket],
+    warnings: list[str],
+    notices: list[str],
 ) -> None:
     for key, value in payload.items():
         if key in NON_BUCKET_KEYS or not isinstance(value, dict):
@@ -181,7 +191,12 @@ def _collect_from_top_level(
 
         known = key in KNOWN_LABELS
         if not known:
-            warnings.append(f"unrecognized bucket {key!r} rendered under its raw key")
+            # A notice, not a warning: the bucket renders with its own dashed
+            # card and label, so it is already visible. Some of these keys are
+            # permanent fixtures of the response, and routing them to the banner
+            # would leave it lit forever -- training the eye to ignore the one
+            # signal that means the data actually went bad.
+            notices.append(f"unrecognized bucket {key!r} rendered under its raw key")
 
         buckets[key] = Bucket(
             key=key,

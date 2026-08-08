@@ -45,6 +45,7 @@ class PollerStatus:
     next_attempt_at: datetime | None = None
     credential_source: str | None = None
     warnings: tuple[str, ...] = field(default=())
+    notices: tuple[str, ...] = field(default=())
 
     @property
     def healthy(self) -> bool:
@@ -61,6 +62,7 @@ class PollerStatus:
             "next_attempt_at": _iso(self.next_attempt_at),
             "credential_source": self.credential_source,
             "warnings": list(self.warnings),
+            "notices": list(self.notices),
         }
 
 
@@ -164,6 +166,7 @@ class Poller:
         self.status.last_error_kind = None
         self.status.consecutive_failures = 0
         self.status.warnings = snapshot.warnings
+        self.status.notices = snapshot.notices
 
         self._poll_count += 1
         if self._poll_count % PRUNE_EVERY_N_POLLS == 0:

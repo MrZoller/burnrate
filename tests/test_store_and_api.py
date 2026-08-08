@@ -68,6 +68,60 @@ def test_raw_snapshot_is_kept_when_the_body_changes(store, live_response):
     assert count == 2
 
 
+def test_known_flag_survives_a_round_trip(store, live_response):
+    """Regression: seven_day_fable is identified from limits[] and is not in
+    KNOWN_LABELS, so recomputing known-ness on read mislabelled it as
+    unrecognized whenever the dashboard was served from the store."""
+    store.append_snapshot(parse_usage(live_response, fetched_at=NOW))
+
+    by_key = {s.bucket: s for s in store.latest_per_bucket()}
+
+    assert by_key["seven_day_fable"].known is True
+    assert by_key["five_hour"].known is True
+    assert by_key["nimbus_quill"].known is False
+
+
+def test_a_database_predating_the_known_column_is_migrated(tmp_path, live_response):
+    import sqlite3
+
+    path = tmp_path / "legacy.db"
+    legacy = sqlite3.connect(path)
+    legacy.executescript(
+        """
+        CREATE TABLE samples (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL,
+            bucket TEXT NOT NULL, label TEXT, utilization REAL NOT NULL,
+            resets_at TEXT
+        );
+        INSERT INTO samples (ts, bucket, label, utilization)
+        VALUES ('2026-08-01T00:00:00+00:00', 'five_hour', '5-hour session', 12.0);
+        """
+    )
+    legacy.commit()
+    legacy.close()
+
+    store = Store(path)  # must not raise
+
+    assert store.latest_per_bucket()[0].known is True
+    assert store.append_snapshot(parse_usage(live_response, fetched_at=NOW)) == 4
+
+
+def test_restored_buckets_keep_the_live_ordering(client):
+    """SQL returns these alphabetically; the dashboard must not reorder on
+    restart and file an unrecognized bucket in among the real ones."""
+    keys = [b["key"] for b in client.get("/api/now").json()["buckets"]]
+
+    assert keys[0] == "five_hour"
+    assert keys[-1] == "nimbus_quill"
+
+
+def test_restored_buckets_report_the_right_known_flag(client):
+    by_key = {b["key"]: b for b in client.get("/api/now").json()["buckets"]}
+
+    assert by_key["seven_day_fable"]["known"] is True
+    assert by_key["nimbus_quill"]["known"] is False
+
+
 def test_an_empty_snapshot_writes_nothing(store):
     assert store.append_snapshot(parse_usage({})) == 0
 

@@ -30,7 +30,13 @@ CREATE TABLE IF NOT EXISTS samples (
     bucket      TEXT    NOT NULL,
     label       TEXT,
     utilization REAL    NOT NULL,
-    resets_at   TEXT
+    resets_at   TEXT,
+    -- Whether the parser recognized this bucket. Persisted rather than
+    -- recomputed on read: a scoped bucket like seven_day_fable is identified
+    -- from limits[] at runtime and is not in KNOWN_LABELS, so recomputing it
+    -- would mark a perfectly well-understood bucket "unrecognized" whenever
+    -- the dashboard is served from the store.
+    known       INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_samples_bucket_ts ON samples (bucket, ts);
 CREATE INDEX IF NOT EXISTS idx_samples_ts ON samples (ts);
@@ -54,6 +60,7 @@ class Sample:
     utilization: float
     resets_at: datetime | None = None
     label: str | None = None
+    known: bool = True
 
 
 class Store:
@@ -64,6 +71,14 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """Add columns introduced after a database was first created."""
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(samples)")}
+        if "known" not in columns:
+            conn.execute("ALTER TABLE samples ADD COLUMN known INTEGER NOT NULL DEFAULT 1")
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -87,6 +102,7 @@ class Store:
                 bucket.label,
                 bucket.utilization,
                 _iso(bucket.resets_at),
+                1 if bucket.known else 0,
             )
             for bucket in snapshot.buckets
         ]
@@ -95,8 +111,8 @@ class Store:
 
         with self._connect() as conn:
             conn.executemany(
-                "INSERT INTO samples (ts, bucket, label, utilization, resets_at)"
-                " VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO samples (ts, bucket, label, utilization, resets_at, known)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
                 rows,
             )
             if raw_body is not None:
@@ -128,7 +144,7 @@ class Store:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT s.ts, s.bucket, s.label, s.utilization, s.resets_at
+                SELECT s.ts, s.bucket, s.label, s.utilization, s.resets_at, s.known
                 FROM samples s
                 JOIN (
                     SELECT bucket, MAX(id) AS id FROM samples GROUP BY bucket
@@ -143,7 +159,7 @@ class Store:
         cutoff = datetime.now(UTC) - timedelta(hours=hours)
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT ts, bucket, label, utilization, resets_at FROM samples"
+                "SELECT ts, bucket, label, utilization, resets_at, known FROM samples"
                 " WHERE ts >= ? ORDER BY ts ASC",
                 (_iso(cutoff),),
             ).fetchall()
@@ -180,6 +196,7 @@ def _row_to_sample(row: sqlite3.Row) -> Sample:
         label=row["label"],
         utilization=row["utilization"],
         resets_at=_parse_iso(row["resets_at"]),
+        known=bool(row["known"]),
     )
 
 
