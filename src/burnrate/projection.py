@@ -66,10 +66,37 @@ def period_hours_for(key: str) -> float:
     return _PERIOD_HOURS.get(key, DEFAULT_PERIOD_HOURS)
 
 
-def project(bucket: Bucket | None, now: datetime | None = None) -> Projection:
-    """Project when `bucket` reaches 100% at its average rate so far."""
+def project(
+    bucket: Bucket | None, now: datetime | None = None, *, stale: bool = False
+) -> Projection:
+    """Project when `bucket` reaches 100% at its average rate so far.
+
+    `now` should be the moment the reading was taken, not wall-clock now. The rate
+    is utilization over time elapsed since the window opened, so a frozen
+    utilization measured against an advancing clock counts every hour since the
+    last sample as zero usage and understates the pace.
+
+    `stale` refuses outright. That case is not a worse estimate, it is a different
+    question: a projection is a claim about where usage is heading *now*, and with
+    a reading hours old there is no honest answer -- measured, a 30%-in-24h
+    reading left frozen for three days drops from 1.25%/h to 0.31%/h and turns a
+    cap warning into "clears the reset". An all-clear derived from missing data is
+    the worst direction for this to fail in.
+    """
     if bucket is None:
         return Projection(status=UNAVAILABLE, message="No weekly bucket in the last response.")
+
+    if stale:
+        return Projection(
+            status=UNAVAILABLE,
+            message=(
+                "The last reading is too old to project from -- the pace would be "
+                "diluted by time we have no data for."
+            ),
+            bucket_key=bucket.key,
+            utilization=bucket.utilization,
+            resets_at=bucket.resets_at,
+        )
 
     now = now or datetime.now(UTC)
     if now.tzinfo is None:

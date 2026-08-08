@@ -166,6 +166,40 @@ def test_a_naive_now_is_treated_as_utc():
     assert project(weekly(14.0), now=naive).status == PROJECTED
 
 
+def test_a_stale_reading_refuses_to_project():
+    """Regression: /api/now projected the last known utilization against the
+    current clock, so every hour since the sample counted as zero usage. A
+    30%-in-24h reading left frozen for three days fell from 1.25%/h to 0.31%/h
+    and the status flipped from "projected" to "clears_reset" -- a cap warning
+    turning itself into an all-clear on no evidence at all."""
+    projection = project(weekly(30.0), now=NOW, stale=True)
+
+    assert projection.status == UNAVAILABLE
+    assert projection.rate_per_hour is None
+    assert projection.hits_cap_at is None
+    assert "too old" in projection.message
+    # Still carries what the UI needs to describe the bucket it refused on.
+    assert projection.bucket_key == "seven_day"
+    assert projection.utilization == 30.0
+
+
+def test_the_dilution_the_stale_guard_exists_to_prevent():
+    """Pinned as arithmetic, so the guard cannot be removed without a red test."""
+    bucket = weekly(30.0, resets_in=WEEK - timedelta(hours=24))
+
+    at_reading = project(bucket, now=NOW)
+    three_days_later = project(bucket, now=NOW + timedelta(days=3))
+
+    assert at_reading.status == PROJECTED
+    assert at_reading.rate_per_hour == pytest.approx(30.0 / 24.0)
+    assert three_days_later.status == CLEARS_RESET
+    assert three_days_later.rate_per_hour < at_reading.rate_per_hour / 3
+
+
+def test_a_stale_reading_with_no_bucket_is_still_unavailable():
+    assert project(None, now=NOW, stale=True).status == UNAVAILABLE
+
+
 def test_faster_burn_always_hits_the_cap_sooner():
     slow = project(weekly(10.0), now=NOW)
     fast = project(weekly(30.0), now=NOW)

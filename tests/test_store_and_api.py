@@ -330,6 +330,22 @@ def test_now_includes_a_projection(client):
     assert body["projection"]["status"] in {"projected", "clears_reset", "insufficient_data"}
 
 
+def test_a_stale_reading_serves_no_projection(make_client):
+    """The defect was in the wiring, not in project(): /api/now passed wall-clock
+    `now` alongside a frozen utilization, so the pace decayed the longer the data
+    sat and a cap warning could turn into "clears the reset". The buckets are
+    still served -- flagged, not withheld -- but the forward-looking claim is not."""
+    with make_client(age_seconds=600) as client:
+        body = client.get("/api/now").json()
+
+    assert body["stale"] is True
+    assert body["buckets"], "the readings themselves are still served"
+    assert body["projection"]["status"] == "unavailable"
+    assert body["projection"]["rate_per_hour"] is None
+    assert body["projection"]["hits_cap_at"] is None
+    assert "too old" in body["projection"]["message"]
+
+
 def test_no_endpoint_leaks_the_token(client):
     for path in ("/api/now", "/api/history?hours=24", "/api/healthz"):
         text = client.get(path).text

@@ -62,25 +62,22 @@ def main(argv: list[str]) -> int:
     rest = argv[2:]
     values = dict(zip(rest[0::2], rest[1::2], strict=True))
 
-    rendered = render(src.read_text(), values)
+    template = src.read_text()
 
-    leftover = sorted({t for t in _placeholders(rendered)})
-    if leftover:
-        print(f"error: unsubstituted placeholders: {', '.join(leftover)}", file=sys.stderr)
+    # Asked of the TEMPLATE, never of the rendered output. Scanning the output
+    # cannot tell a placeholder the template still needs from placeholder-shaped
+    # text that arrived inside a value: a database path of /tmp/__DB__/x.db is
+    # perfectly legal, render() preserves it exactly as promised, and the output
+    # scan then called it an unsubstituted token and failed the install. The
+    # template is the only thing that knows what needs filling in.
+    missing = sorted({m.group(1) for m in PLACEHOLDER.finditer(template)} - set(values))
+    if missing:
+        names = ", ".join(f"__{name}__" for name in missing)
+        print(f"error: the template needs values not given: {names}", file=sys.stderr)
         return 1
 
-    dst.write_text(rendered)
+    dst.write_text(render(template, values))
     return 0
-
-
-def _placeholders(text: str) -> list[str]:
-    """Every `__NAME__` token still present, so a renamed key fails loudly.
-
-    A template gaining a placeholder the installer does not pass would otherwise
-    ship a plist with a literal `__THING__` in it, and launchd would treat that
-    as a real path.
-    """
-    return [m.group(0) for m in PLACEHOLDER.finditer(text)]
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised via subprocess in tests

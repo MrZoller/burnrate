@@ -36,6 +36,9 @@ const state = {
   hours: 168,
   buckets: [],
   now: null,
+  // The last history payload, kept so the charts can be redrawn without a fetch
+  // when /api/now fails and their labels need to stop claiming to be current.
+  history: null,
   lastGoodAt: null,
 };
 
@@ -593,6 +596,15 @@ async function refresh({ history = true } = {}) {
     els.freshness.textContent = state.lastGoodAt
       ? `Stale since ${formatAge((Date.now() - state.lastGoodAt) / 1000)}`
       : "Unavailable";
+    // The snapshot we are holding is now of unknown age, so say so in the data
+    // rather than only in the banner. Marking it here is what stops the chart
+    // headings claiming "now" for the whole length of an outage, and it also
+    // makes a later range click render honestly from the same cached series.
+    // Redrawn from cache deliberately -- refetching is pointless when the
+    // backend is what just failed, and the labels recompute their age from the
+    // clock, so they keep ageing while the outage lasts.
+    if (state.now && !state.now.stale) state.now = { ...state.now, stale: true };
+    if (state.history) renderCharts(state.history);
   } finally {
     delete els.page.dataset.refreshing;
   }
@@ -600,47 +612,8 @@ async function refresh({ history = true } = {}) {
 
 async function refreshHistory() {
   try {
-    const data = await loadHistory(state.hours);
-    const end = Date.now();
-    const start = end - state.hours * 3600 * 1000;
-    const order = new Map(state.buckets.map((b, i) => [b.key, i]));
-    // Keys the API is reporting right now. Empty when /api/now has never
-    // succeeded, which correctly makes every series read as historical rather
-    // than asserting currency we have no basis for.
-    const current = new Set(state.buckets.map((b) => b.key));
-    // Membership alone is not enough. A stale snapshot still reports its last
-    // known buckets -- that is deliberate, so a restart shows real numbers -- so
-    // every one of those keys would pass the membership test while the readings
-    // behind them are hours or days old. Restore an old database and the whole
-    // dashboard would have said "now" over three-day-old values. The banner
-    // warning about it is not a licence for the series labels to disagree.
-    const snapshotIsCurrent = Boolean(state.now) && !state.now.stale;
-    const series = (data.series || []).sort(
-      (a, b) => (order.get(a.key) ?? 99) - (order.get(b.key) ?? 99),
-    );
-
-    els.charts.replaceChildren(
-      ...(series.length
-        ? series.map((s) =>
-            renderChart(s, start, end, {
-              isCurrent: snapshotIsCurrent && current.has(s.key),
-              // Two different reasons a label cannot say "now", and a reader
-              // needs to know which: the bucket is gone, or the whole snapshot
-              // is behind.
-              note: current.has(s.key)
-                ? "The latest reading is stale, so this is the last value recorded rather than a current one."
-                : "No longer reported by the API; this is its last recorded value.",
-            }),
-          )
-        : [
-            el("div", { class: "chart" }, [
-              el("div", {
-                class: "chart__empty",
-                text: "No history yet. Samples appear within a minute of the first successful poll.",
-              }),
-            ]),
-          ]),
-    );
+    state.history = await loadHistory(state.hours);
+    renderCharts(state.history);
   } catch (error) {
     els.charts.replaceChildren(
       el("div", { class: "chart" }, [
@@ -648,6 +621,55 @@ async function refreshHistory() {
       ]),
     );
   }
+}
+
+/* Separated from the fetch so a failed /api/now can redraw the labels from the
+ * series already in hand. Without that an outage froze the headings at "now 61%"
+ * for as long as it lasted: refresh()'s catch rewrote only the banner, so
+ * state.now.stale stayed false and nothing re-evaluated the labels while the data
+ * aged. Third route into the same defect, after the gauges and the stale
+ * snapshot. */
+function renderCharts(data) {
+  const end = Date.now();
+  const start = end - state.hours * 3600 * 1000;
+  const order = new Map(state.buckets.map((b, i) => [b.key, i]));
+  // Keys the API is reporting right now. Empty when /api/now has never
+  // succeeded, which correctly makes every series read as historical rather
+  // than asserting currency we have no basis for.
+  const current = new Set(state.buckets.map((b) => b.key));
+  // Membership alone is not enough. A stale snapshot still reports its last
+  // known buckets -- that is deliberate, so a restart shows real numbers -- so
+  // every one of those keys would pass the membership test while the readings
+  // behind them are hours or days old. Restore an old database and the whole
+  // dashboard would have said "now" over three-day-old values. The banner
+  // warning about it is not a licence for the series labels to disagree.
+  const snapshotIsCurrent = Boolean(state.now) && !state.now.stale;
+  const series = (data.series || []).sort(
+    (a, b) => (order.get(a.key) ?? 99) - (order.get(b.key) ?? 99),
+  );
+
+  els.charts.replaceChildren(
+    ...(series.length
+      ? series.map((s) =>
+          renderChart(s, start, end, {
+            isCurrent: snapshotIsCurrent && current.has(s.key),
+            // Two different reasons a label cannot say "now", and a reader
+            // needs to know which: the bucket is gone, or the whole snapshot
+            // is behind.
+            note: current.has(s.key)
+              ? "The latest reading is stale, so this is the last value recorded rather than a current one."
+              : "No longer reported by the API; this is its last recorded value.",
+          }),
+        )
+      : [
+          el("div", { class: "chart" }, [
+            el("div", {
+              class: "chart__empty",
+              text: "No history yet. Samples appear within a minute of the first successful poll.",
+            }),
+          ]),
+        ]),
+  );
 }
 
 els.range.addEventListener("click", (event) => {

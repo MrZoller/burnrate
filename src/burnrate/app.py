@@ -72,6 +72,11 @@ def create_app(config: Config | None = None) -> FastAPI:
             or poller.status.consecutive_failures > 0
         )
 
+        # The moment the reading was taken, which is what the projection must be
+        # anchored to. Measuring a frozen utilization against an advancing clock
+        # counts every hour since the last sample as zero usage.
+        reading_at = poller.status.last_success_at or store.latest_sample_time()
+
         return JSONResponse(
             {
                 "generated_at": moment.isoformat(),
@@ -80,7 +85,9 @@ def create_app(config: Config | None = None) -> FastAPI:
                 "stale_after_seconds": STALE_AFTER_SECONDS,
                 "poll_interval_seconds": config.poll_interval,
                 "buckets": [_bucket_json(b) for b in buckets],
-                "projection": _projection_json(project(weekly, now=moment)),
+                "projection": _projection_json(
+                    project(weekly, now=reading_at or moment, stale=stale)
+                ),
                 "status": poller.status.as_dict(),
             }
         )

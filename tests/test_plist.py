@@ -73,6 +73,22 @@ def test_a_value_containing_a_placeholder_is_not_expanded():
     assert parsed["EnvironmentVariables"]["BURNRATE_DB"] == "/tmp/real.db"
 
 
+def test_a_value_containing_a_placeholder_does_not_fail_the_render(tmp_path):
+    """Regression: the leftover-placeholder check scanned the RENDERED output, so
+    a legal database path like /tmp/__DB__/x.db -- which render() preserves
+    exactly as designed -- was mistaken for an unfilled template token and the
+    install died on a valid path. The template is the only thing that knows what
+    still needs a value."""
+    src = tmp_path / "t.plist"
+    src.write_text(TEMPLATE)
+    dst = tmp_path / "out.plist"
+
+    rc = main([str(src), str(dst), "LABEL", "x", "DB", "/tmp/__DB__/x.db"])
+
+    assert rc == 0
+    assert _db_from(dst.read_text()) == "/tmp/__DB__/x.db"
+
+
 def test_an_unsubstituted_placeholder_is_an_error(tmp_path, capsys):
     """A template gaining a key the installer does not pass would otherwise ship
     a plist with a literal __THING__ in it, which launchd reads as a real path."""
