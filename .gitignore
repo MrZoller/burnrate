@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/
+.DS_Store
+.ruff_cache/
