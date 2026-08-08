@@ -2,6 +2,8 @@
 name = "burnrate"
 version = "0.1.0"
 description = "Self-hosted web dashboard for Claude Max plan usage"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
@@ -35,4 +37,5 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 asyncio_mode = "auto"

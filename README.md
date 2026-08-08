@@ -183,3 +183,9 @@ carries the same numbers for anything that does not read well as a chart.
 Polling is every 60s, backing off exponentially to a 15-minute ceiling while
 failures persist, and resetting on the first success. Samples are kept 90 days,
 raw response bodies 14.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
