@@ -39,7 +39,10 @@ const state = {
   // The last history payload, kept so the charts can be redrawn without a fetch
   // when /api/now fails and their labels need to stop claiming to be current.
   history: null,
-  lastGoodAt: null,
+  // The moment the newest reading was taken, derived from the age the backend
+  // reported rather than from our own clock, so an outage reports the data's real
+  // age instead of the time since we last managed to fetch it.
+  readingAt: null,
 };
 
 /* ---------------------------------------------------------------- utilities */
@@ -573,7 +576,14 @@ async function refresh({ history = true } = {}) {
     const data = await loadNow();
     state.now = data;
     state.buckets = data.buckets || [];
-    state.lastGoodAt = Date.now();
+    // When the READING was taken, not when we fetched it. A successful fetch of
+    // an already-stale snapshot used to stamp this with the browser's clock, so
+    // if the backend then went away the outage message read "Stale since 60s ago"
+    // over data that was days old -- the fetch succeeding was mistaken for the
+    // data being fresh. Null staleness means no reading exists at all, and there
+    // is no good moment to record.
+    state.readingAt =
+      data.staleness_seconds == null ? null : Date.now() - data.staleness_seconds * 1000;
 
     renderBanner(data, null);
     renderGauges(state.buckets);
@@ -593,8 +603,8 @@ async function refresh({ history = true } = {}) {
     if (history) await refreshHistory();
   } catch (error) {
     renderBanner(null, String(error.message || error));
-    els.freshness.textContent = state.lastGoodAt
-      ? `Stale since ${formatAge((Date.now() - state.lastGoodAt) / 1000)}`
+    els.freshness.textContent = state.readingAt
+      ? `Stale — last read ${formatAge((Date.now() - state.readingAt) / 1000)}`
       : "Unavailable";
     // The snapshot we are holding is now of unknown age, so say so in the data
     // rather than only in the banner. Marking it here is what stops the chart

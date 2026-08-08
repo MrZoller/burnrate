@@ -22,6 +22,12 @@ OAUTH_BETA = "oauth-2025-04-20"
 USER_AGENT = "burnrate/0.1 (+https://github.com/MrZoller/burnrate)"
 REQUEST_TIMEOUT_SECONDS = 20.0
 
+# Body excerpt lengths. The short one is for an error message a human reads in a
+# banner; the longer one is for the archived copy of a body that broke the
+# parser, where 200 characters of an HTML error page says nothing useful.
+ERROR_BODY_LIMIT = 200
+ARCHIVE_BODY_LIMIT = 4000
+
 
 class UsageFetchError(RuntimeError):
     """Base class for a failed usage fetch."""
@@ -45,7 +51,19 @@ class UsageTransportError(UsageFetchError):
 
 
 class UsageProtocolError(UsageFetchError):
-    """A 2xx whose body was not JSON."""
+    """A 2xx whose body was not JSON.
+
+    Carries the redacted body so the poller can archive it. This is the likeliest
+    shape a real endpoint change takes -- an HTML error page, a login redirect, a
+    truncated response -- and it is exactly the body the raw archive exists to
+    preserve, yet it never reached the store: the decode fails here, so the poller
+    only ever saw the exception. `body` is scrubbed by the same rules as the error
+    message, because it is written to the database.
+    """
+
+    def __init__(self, message: str, body: str = "") -> None:
+        self.body = body
+        super().__init__(message)
 
 
 def build_headers(access_token: str) -> dict[str, str]:
@@ -79,22 +97,27 @@ async def fetch_usage(
         try:
             return response.json()
         except ValueError as exc:
-            raise UsageProtocolError(f"response was not JSON: {exc}") from exc
+            raise UsageProtocolError(
+                f"response was not JSON: {exc}",
+                body=_short_body(response, access_token, limit=ARCHIVE_BODY_LIMIT),
+            ) from exc
     finally:
         if owned:
             await client.aclose()
 
 
-def _short_body(response: httpx.Response, secret: str = "") -> str:
+def _short_body(response: httpx.Response, secret: str = "", limit: int = ERROR_BODY_LIMIT) -> str:
     """A trimmed body excerpt for diagnostics, with credentials stripped.
 
     This text ends up in PollerStatus.last_error, which /api/now serves to the
-    browser and the logger writes to disk. An upstream that echoes the token
-    back in an error body would otherwise leak it into both, so the excerpt is
-    scrubbed of the token we sent and of anything else credential-shaped.
+    browser and the logger writes to disk -- and, at the archive limit, in the
+    database. An upstream that echoes the token back in an error body would
+    otherwise leak it into all three, so the excerpt is scrubbed of the token we
+    sent and of anything else credential-shaped. Every caller goes through here
+    for exactly that reason; nothing takes `response.text` directly.
     """
     try:
-        excerpt = response.text[:200].replace("\n", " ").strip()
+        excerpt = response.text[:limit].replace("\n", " ").strip()
     except Exception:  # pragma: no cover - defensive
         return ""
     if secret:

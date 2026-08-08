@@ -6,7 +6,12 @@ from datetime import UTC, datetime
 import pytest
 
 from burnrate import poller as poller_module
-from burnrate.client import UsageAuthError, UsageHTTPError, UsageTransportError
+from burnrate.client import (
+    UsageAuthError,
+    UsageHTTPError,
+    UsageProtocolError,
+    UsageTransportError,
+)
 from burnrate.credentials import Credential, CredentialError
 from burnrate.poller import MAX_BACKOFF_SECONDS, Poller
 from burnrate.store import Store
@@ -140,6 +145,51 @@ async def test_the_body_that_broke_the_parser_is_archived(store, monkeypatch):
 
     assert len(bodies) == 1
     assert "entirely new" in bodies[0]
+
+
+async def test_an_undecodable_200_is_archived_too(store, monkeypatch):
+    """The other unreadable-200 shape, and the likelier one in practice: the JSON
+    decode fails inside the client, so the poller never receives a payload. It
+    used to record the failure with nothing kept, losing exactly the evidence the
+    archive exists for."""
+    _credentials(monkeypatch, "tok")
+
+    def handler(token, n):
+        raise UsageProtocolError(
+            "response was not JSON: char 0",
+            body="<html><body>Sign in to continue</body></html>",
+        )
+
+    _fetches(monkeypatch, handler)
+    poller = Poller(store)
+
+    assert await poller.poll_once() is None
+    assert poller.status.last_error_kind == "protocol"
+
+    with store._connect() as conn:
+        bodies = [row["body"] for row in conn.execute("SELECT body FROM raw_snapshots")]
+
+    assert len(bodies) == 1
+    assert "Sign in to continue" in bodies[0]
+
+
+async def test_a_protocol_error_without_a_body_archives_nothing(store, monkeypatch):
+    """No body means nothing to keep -- it must not write an empty row."""
+    _credentials(monkeypatch, "tok")
+
+    def handler(token, n):
+        raise UsageProtocolError("response was not JSON: char 0")
+
+    _fetches(monkeypatch, handler)
+    poller = Poller(store)
+
+    await poller.poll_once()
+
+    with store._connect() as conn:
+        count = conn.execute("SELECT COUNT(*) AS n FROM raw_snapshots").fetchone()["n"]
+
+    assert count == 0
+    assert poller.status.last_error_kind == "protocol"
 
 
 async def test_a_failed_archive_does_not_replace_the_schema_diagnosis(store, monkeypatch):

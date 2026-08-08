@@ -20,7 +20,7 @@ from typing import Any
 
 import httpx
 
-from .client import UsageAuthError, UsageFetchError, fetch_usage
+from .client import UsageAuthError, UsageFetchError, UsageProtocolError, fetch_usage
 from .credentials import CredentialError, read_credential
 from .store import Store
 from .usage import UsageSnapshot, parse_usage
@@ -142,6 +142,16 @@ class Poller:
         except CredentialError as exc:
             self._record_failure("credential", str(exc))
             return None
+        except UsageProtocolError as exc:
+            # A 2xx we could not decode -- HTML error page, login redirect,
+            # truncated body. The likeliest shape a real endpoint change takes,
+            # and until now the one the raw archive never captured: the decode
+            # fails inside the client, so there was no payload to hand on. The
+            # body arrives already redacted.
+            if exc.body:
+                self._archive_unreadable(exc.body, now)
+            self._record_failure(_error_kind(exc), str(exc))
+            return None
         except UsageFetchError as exc:
             self._record_failure(_error_kind(exc), str(exc))
             return None
@@ -188,8 +198,12 @@ class Poller:
 
         return snapshot
 
-    def _archive_unreadable(self, payload: Any, ts: datetime) -> None:
+    def _archive_unreadable(self, body: Any, ts: datetime) -> None:
         """Keep the body that broke the parser, without letting that failure win.
+
+        `body` is a decoded payload when the JSON parsed but yielded no buckets,
+        and a redacted text excerpt when the decode itself failed. Both are the
+        same kind of evidence about the same kind of break.
 
         Swallowed on purpose, and separately from the store failure the sample
         path reports: the caller is already on its way to recording a schema
@@ -197,7 +211,7 @@ class Poller:
         a less useful one about the database.
         """
         try:
-            self.store.append_raw(payload, ts=ts)
+            self.store.append_raw(body, ts=ts)
         except Exception:  # noqa: BLE001 - archiving is best-effort by design
             logger.exception("failed to archive the unreadable response body")
 

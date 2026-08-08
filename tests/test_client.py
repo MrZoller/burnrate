@@ -10,7 +10,10 @@ import httpx
 import pytest
 
 from burnrate.client import (
+    ARCHIVE_BODY_LIMIT,
+    ERROR_BODY_LIMIT,
     OAUTH_BETA,
+    REDACTED,
     USAGE_URL,
     UsageAuthError,
     UsageHTTPError,
@@ -97,6 +100,44 @@ async def test_a_200_that_is_not_json_is_a_protocol_error():
     async with _client(lambda r: httpx.Response(200, text="<html>hello</html>")) as client:
         with pytest.raises(UsageProtocolError):
             await fetch_usage(TOKEN, client=client)
+
+
+async def test_a_protocol_error_carries_the_body_for_the_archive():
+    """The decode fails inside the client, so without this the poller has no
+    payload to archive and the likeliest shape of a real endpoint change -- an
+    HTML error page -- was the one the raw archive never captured."""
+    page = "<html><body>Sign in to continue</body></html>"
+    async with _client(lambda r: httpx.Response(200, text=page)) as client:
+        with pytest.raises(UsageProtocolError) as excinfo:
+            await fetch_usage(TOKEN, client=client)
+
+    assert "Sign in to continue" in excinfo.value.body
+
+
+async def test_the_archived_body_is_redacted():
+    """It is written to the database, so the token must not survive in it -- both
+    the exact token we sent and anything else credential-shaped."""
+    leaky = f"<html>token={TOKEN} other=sk-ant-oat01-somethingelse</html>"
+    async with _client(lambda r: httpx.Response(200, text=leaky)) as client:
+        with pytest.raises(UsageProtocolError) as excinfo:
+            await fetch_usage(TOKEN, client=client)
+
+    body = excinfo.value.body
+    assert TOKEN not in body
+    assert "sk-ant" not in body
+    assert REDACTED in body
+
+
+async def test_the_archived_body_is_longer_than_the_error_excerpt():
+    """200 characters of an HTML error page says nothing useful, and the archive
+    exists to be read later; the banner excerpt stays short."""
+    long_page = "<html>" + ("x" * 3000) + "</html>"
+    async with _client(lambda r: httpx.Response(200, text=long_page)) as client:
+        with pytest.raises(UsageProtocolError) as excinfo:
+            await fetch_usage(TOKEN, client=client)
+
+    assert len(excinfo.value.body) > ERROR_BODY_LIMIT
+    assert len(excinfo.value.body) <= ARCHIVE_BODY_LIMIT
 
 
 async def test_a_network_failure_maps_to_transport_error():
