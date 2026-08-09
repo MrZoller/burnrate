@@ -291,11 +291,22 @@ def _str_or(value: object, default: str) -> str:
 
 
 def _parse_timestamp(raw: object) -> datetime | None:
-    """Parse an ISO-8601 (``...Z``) timestamp to an aware UTC datetime, or ``None``."""
+    """Parse an ISO-8601 (``...Z``) timestamp to an aware UTC datetime, or ``None``.
+
+    The conversion to UTC happens HERE, guarded, not merely a tz attachment. A
+    far-future value like ``9999-12-31T23:59:59-12:00`` parses fine but overflows
+    ``datetime.max`` when shifted to UTC -- and that shift happens downstream in the
+    store's ``_iso``, inside ``aggregate_jsonl`` before the watermark flush, so the
+    OverflowError freezes the offset and every later pass re-reads and re-raises. Doing
+    the shift here under ``try`` drops such a record (``turn_from_record`` handles
+    ``None``) instead of poisoning aggregation.
+    """
     if not isinstance(raw, str) or not raw:
         return None
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+    except (ValueError, OverflowError):
         return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)

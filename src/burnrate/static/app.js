@@ -1017,6 +1017,11 @@ async function refreshAttribution() {
   const token = ++attributionRequest;
   try {
     const data = await loadAttribution(state.attrWindow);
+    // The watermark orders same-window races, but not window identity: a 7d response
+    // landing after the user clicked 24h would otherwise render 7d figures under the
+    // pressed 24h button (forever, if the 24h request hangs). Drop a response whose
+    // window is no longer the selected one, and do NOT advance the watermark for it.
+    if (data.window !== state.attrWindow) return;
     if (token <= appliedAttribution) return;
     appliedAttribution = token;
     renderAttribution(data);

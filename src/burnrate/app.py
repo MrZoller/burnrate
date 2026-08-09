@@ -321,36 +321,63 @@ def _project_segments(path: str) -> list[str]:
     return [seg for seg in Path(path).parts if seg not in ("", "/")] or [path]
 
 
+# Most segments a disambiguated project label may show: the basename plus at most two
+# parents. Beyond this the label stops being a readable name and starts being a path.
+_MAX_LABEL_SEGMENTS = 3
+# Marks a label capped below the full path, so a shared abbreviation reads as truncated
+# rather than as the real directory. U+2026 is the ellipsis; kept as an escape so the
+# source stays ASCII.
+_TRUNCATED_PREFIX = "\u2026/"
+
+
 def _project_display_names(paths: list[str]) -> dict[str, str]:
-    """Map each distinct working directory to a readable, unambiguous label.
+    """Map each distinct working directory to a readable, bounded label.
 
     The privacy-lean default is the basename alone. Two directories that share a
-    basename (/clients/a/app and /clients/b/app) would otherwise render identically
-    and each claim a top-N slot, so colliding labels grow one parent segment at a
-    time -- and only those; a directory with a unique basename keeps just its
-    basename. Termination is guaranteed because distinct paths differ within their
-    full segment lists.
+    basename (/clients/a/app and /clients/b/app) would otherwise render identically and
+    each claim a top-N slot, so colliding labels grow one parent segment at a time --
+    and only those; a unique basename keeps just its basename.
+
+    Growth is capped at ``_MAX_LABEL_SEGMENTS`` so a pathological pair -- one path a
+    strict suffix of another (/Users/alice/app vs /mnt/Users/alice/app) -- never
+    expands a label into a near-full path chasing a distinction it cannot win. Whatever
+    still collides at the cap keeps the shared abbreviated label with a leading marker,
+    signalling truncation instead of exposing the whole directory.
     """
     segments = {p: _project_segments(p) for p in set(paths)}
     depth = dict.fromkeys(segments, 1)
 
-    def label(p: str) -> str:
+    def cap(p: str) -> int:
+        return min(len(segments[p]), _MAX_LABEL_SEGMENTS)
+
+    def suffix(p: str) -> str:
         return "/".join(segments[p][-depth[p] :])
 
     while True:
         collisions = False
         by_label: dict[str, list[str]] = {}
         for p in segments:
-            by_label.setdefault(label(p), []).append(p)
+            by_label.setdefault(suffix(p), []).append(p)
         for members in by_label.values():
             if len(members) < 2:
                 continue
             for p in members:
-                if depth[p] < len(segments[p]):
+                if depth[p] < cap(p):  # grow only up to the cap, never past it
                     depth[p] += 1
                     collisions = True
         if not collisions:
-            return {p: label(p) for p in segments}
+            break
+
+    # Anything still sharing a label at the cap gets the truncation marker, so a shared
+    # abbreviation is never mistaken for a real, unique directory.
+    grouped: dict[str, list[str]] = {}
+    for p in segments:
+        grouped.setdefault(suffix(p), []).append(p)
+    return {
+        p: (_TRUNCATED_PREFIX + label if len(members) > 1 else label)
+        for label, members in grouped.items()
+        for p in members
+    }
 
 
 def _to_series(samples: list[Sample]) -> list[dict[str, Any]]:

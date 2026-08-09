@@ -241,6 +241,96 @@ def test_the_plausibility_ceiling_rejects_above_but_keeps_a_real_large_turn():
     assert real.input_tokens == 2_000_000  # a big real turn is unchanged, never clamped
 
 
+def test_a_far_future_timestamp_is_dropped_without_freezing(tmp_path):
+    """Codex #1: a timestamp that overflows datetime.max when shifted to UTC must be
+    dropped at parse, not raise inside aggregate_jsonl (which would freeze the watermark
+    and re-raise every later pass)."""
+    poison_ts = "9999-12-31T23:59:59-12:00"  # parses, but astimezone(UTC) overflows
+    assert (
+        turn_from_record(
+            {
+                "type": "assistant",
+                "cwd": "/work/a",
+                "sessionId": "s1",
+                "timestamp": poison_ts,
+                "message": {"model": "claude-opus-4-8", "usage": {"input_tokens": 10}},
+            }
+        )
+        is None
+    )
+
+    now = datetime.now(UTC)
+    poison = json.dumps(
+        {
+            "type": "assistant",
+            "cwd": "/work/a",
+            "sessionId": "s1",
+            "timestamp": poison_ts,
+            "message": {
+                "model": "claude-opus-4-8",
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            },
+        }
+    )
+    healthy = _assistant(ts=now, cwd="/work/a", input_tokens=3, output_tokens=0)
+    root = _tree(tmp_path / "projects", {"a.jsonl": [poison, healthy]})
+    store = Store(tmp_path / "b.db")
+
+    first = store.aggregate_jsonl(root)  # must not raise OverflowError
+    second = store.aggregate_jsonl(root)
+
+    assert first.emitted == 1  # only the healthy turn; the poison record is dropped
+    assert second.emitted == 0  # committed and watermark advanced, not re-read forever
+    totals = store.attribution_totals(168, now=now)
+    assert dict(totals["by_project"])["/work/a"] == 3
+
+
+def test_future_dated_data_is_excluded_from_the_window(tmp_path):
+    """Codex #4: a future-dated bucket/session (clock skew or garbage) is not in any
+    real window, so the upper bound must exclude it -- a lower-bound-only filter keeps
+    it forever."""
+    now = datetime.now(UTC)
+    root = _tree(
+        tmp_path / "projects",
+        {
+            "a.jsonl": [
+                _assistant(session="present", ts=now, input_tokens=10, output_tokens=0),
+                _assistant(
+                    session="future", ts=now + timedelta(hours=2), input_tokens=999, output_tokens=0
+                ),
+            ],
+        },
+    )
+    store = Store(tmp_path / "b.db")
+    store.aggregate_jsonl(root)
+
+    total = sum(t for _, t in store.attribution_totals(24, now=now)["by_project"])
+    assert total == 10  # the future hour bucket is excluded
+
+    ids = {s["session_id"] for s in store.attribution_sessions(24, now=now)}
+    assert ids == {"present"}  # the future-dated session is excluded
+
+
+def test_project_labels_are_bounded_for_suffix_nested_paths():
+    """Codex #6: when one path is a strict suffix of another, disambiguation stops at
+    the cap and marks the shared label truncated, rather than expanding it into a
+    near-full path."""
+    from burnrate.app import _project_display_names
+
+    names = _project_display_names(
+        ["/Users/alice/client/app", "/mnt/backup/Users/alice/client/app"]
+    )
+    assert set(names.values()) == {"\u2026/alice/client/app"}  # basename + 2 parents, marked
+    assert not any(v.startswith("/") for v in names.values())  # never a full path
+
+
+def test_project_labels_resolve_a_plain_collision_without_a_marker():
+    from burnrate.app import _project_display_names
+
+    names = _project_display_names(["/clients/a/app", "/clients/b/app"])
+    assert names == {"/clients/a/app": "a/app", "/clients/b/app": "b/app"}
+
+
 def test_missing_cwd_and_session_fall_back_to_unknown():
     turn = turn_from_record(
         {

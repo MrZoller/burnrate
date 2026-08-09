@@ -1101,3 +1101,31 @@ async def test_a_non_429_failure_clears_a_prior_retry_after(store, monkeypatch):
     assert poller._retry_after_seconds is None
     assert poller.status.consecutive_failures == 2
     assert poller.next_delay() == 120.0  # pure exponential for two failures
+
+
+async def test_the_reading_is_stamped_after_aggregation(
+    store, monkeypatch, live_response, tmp_path
+):
+    """Codex #2: last_success_at is the fetch time captured AFTER aggregation, not the
+    poll-start time. Reusing poll-start `now` charged a multi-minute first scan to
+    freshness, so a just-fetched sample read stale. last_attempt_at keeps the start."""
+    import time
+
+    from burnrate.store import AggregateStats
+
+    _credentials(monkeypatch, "tok")
+    _fetches(monkeypatch, lambda token, n: live_response)
+    finished: dict[str, datetime] = {}
+
+    def slow_aggregate(root, *args, **kwargs):
+        time.sleep(0.05)  # stand in for a long first scan
+        finished["at"] = datetime.now(UTC)
+        return AggregateStats()
+
+    monkeypatch.setattr(store, "aggregate_jsonl", slow_aggregate)
+    poller = Poller(store, projects_dir=tmp_path)
+
+    await poller.poll_once()
+
+    assert poller.status.last_attempt_at < finished["at"], "the attempt is stamped before the scan"
+    assert poller.status.last_success_at >= finished["at"], "the sample is stamped after the scan"

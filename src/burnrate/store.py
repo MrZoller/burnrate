@@ -523,7 +523,20 @@ class Store:
         now = now or datetime.now(UTC)
         cutoff_at = (now - timedelta(hours=hours)).replace(minute=0, second=0, microsecond=0)
         cutoff = _iso(cutoff_at)
+        # Upper bound at now: no legitimate in-window bucket is in the future, so this
+        # only excludes garbage (a future-dated hour from clock skew or a bad timestamp)
+        # that a lower-bound-only filter would otherwise include forever. Asymmetric --
+        # there is no undercount cost, unlike the lower-bound flooring.
+        upper = _iso(now)
+        window = (cutoff, upper)
         with self._connect() as conn:
+            # One read transaction so all four SELECTs see a single WAL snapshot. Python's
+            # sqlite3 opens no implicit transaction for SELECT, so without this a
+            # concurrent aggregation commit (the poller's worker-thread connection)
+            # landing between statements could let by_project/by_model count turns the
+            # breakdown denominator omitted -- a share transiently over 100%. The
+            # _connect() commit on exit closes this read transaction.
+            conn.execute("BEGIN")
             breakdown = conn.execute(
                 "SELECT"
                 "  COALESCE(SUM(input_tokens), 0) AS input_tokens,"
@@ -531,26 +544,26 @@ class Store:
                 "  COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,"
                 "  COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,"
                 "  COALESCE(SUM(large_context_tokens), 0) AS large_context_tokens"
-                " FROM hourly_usage WHERE hour_start >= ?",
-                (cutoff,),
+                " FROM hourly_usage WHERE hour_start >= ? AND hour_start <= ?",
+                window,
             ).fetchone()
             by_project = conn.execute(
                 f"SELECT project AS name, SUM({_HOURLY_TOKENS}) AS tokens"
-                " FROM hourly_usage WHERE hour_start >= ?"
+                " FROM hourly_usage WHERE hour_start >= ? AND hour_start <= ?"
                 " GROUP BY project ORDER BY tokens DESC",
-                (cutoff,),
+                window,
             ).fetchall()
             by_model = conn.execute(
                 f"SELECT model AS name, SUM({_HOURLY_TOKENS}) AS tokens"
-                " FROM hourly_usage WHERE hour_start >= ?"
+                " FROM hourly_usage WHERE hour_start >= ? AND hour_start <= ?"
                 " GROUP BY model ORDER BY tokens DESC",
-                (cutoff,),
+                window,
             ).fetchall()
             by_agent = conn.execute(
                 f"SELECT is_sidechain, SUM({_HOURLY_TOKENS}) AS tokens"
-                " FROM hourly_usage WHERE hour_start >= ?"
+                " FROM hourly_usage WHERE hour_start >= ? AND hour_start <= ?"
                 " GROUP BY is_sidechain",
-                (cutoff,),
+                window,
             ).fetchall()
         # large_context_tokens is a subset of the four token columns, so it is pulled
         # out of the breakdown here to serve the windowed large-context share directly.
@@ -580,12 +593,16 @@ class Store:
         now = now or datetime.now(UTC)
         cutoff_at = (now - timedelta(hours=hours)).replace(minute=0, second=0, microsecond=0)
         cutoff = _iso(cutoff_at)
+        # Upper bound at now, as in attribution_totals: a session whose activity is dated
+        # in the future is garbage (skew or a bad timestamp), not a session active in the
+        # window, and would otherwise sit at the top of the list forever.
+        upper = _iso(now)
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT session_id, project, model, start_ts, end_ts, total_tokens,"
                 " max_turn_context FROM sessions_rollup"
-                " WHERE end_ts >= ? ORDER BY end_ts DESC",
-                (cutoff,),
+                " WHERE end_ts >= ? AND end_ts <= ? ORDER BY end_ts DESC",
+                (cutoff, upper),
             ).fetchall()
         return [
             {

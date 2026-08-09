@@ -230,6 +230,13 @@ class Poller:
         # JSONLs, so it must keep updating even while the remote endpoint is failing.
         await self._maybe_aggregate(now)
 
+        # The reading's own timestamp, taken AFTER aggregation and just before the fetch.
+        # A first aggregation pass can take minutes; reusing the poll-start `now` here
+        # charged that scan's duration to freshness, so a just-fetched sample read stale
+        # -- worst at startup, when the scan is longest. `now` still stamps the attempt
+        # and gates prune/aggregate; `fetched_at` stamps the sample and its success.
+        fetched_at = datetime.now(UTC)
+
         try:
             payload = await self._fetch_with_one_auth_retry()
         except CredentialError as exc:
@@ -242,7 +249,7 @@ class Poller:
             # or a 5xx -- the responses that actually explain why the dashboard went
             # quiet -- were not. The body arrives already redacted.
             if exc.body:
-                self._archive_unreadable(exc.body, now)
+                self._archive_unreadable(exc.body, fetched_at)
             self._record_failure(
                 _error_kind(exc), str(exc), retry_after_seconds=_retry_after_from(exc)
             )
@@ -259,10 +266,10 @@ class Poller:
         # exception on this path has killed the task, which is enough to stop relying
         # on having enumerated the ways.
         try:
-            snapshot = parse_usage(payload, fetched_at=now)
+            snapshot = parse_usage(payload, fetched_at=fetched_at)
         except Exception as exc:  # noqa: BLE001 - the loop outliving this is the point
             logger.exception("parser raised on a response")
-            self._archive_unreadable(payload, now)
+            self._archive_unreadable(payload, fetched_at)
             self._record_failure("schema", f"parser error: {type(exc).__name__}: {exc}")
             return None
 
@@ -271,7 +278,7 @@ class Poller:
             # body on the way past: this is precisely the response the raw
             # archive exists for, and it is the only kind that never reached it,
             # since the sample-writing path below is what normally records one.
-            self._archive_unreadable(payload, now)
+            self._archive_unreadable(payload, fetched_at)
             self._record_failure(
                 "schema",
                 "; ".join(snapshot.warnings) or "response contained no usable buckets",
@@ -287,7 +294,7 @@ class Poller:
             return None
 
         self.snapshot = snapshot
-        self.status.last_success_at = now
+        self.status.last_success_at = fetched_at
         self.status.last_error = None
         self.status.last_error_kind = None
         self.status.consecutive_failures = 0
