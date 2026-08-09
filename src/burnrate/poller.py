@@ -30,7 +30,12 @@ logger = logging.getLogger("burnrate.poller")
 POLL_INTERVAL_SECONDS = 60.0
 MAX_BACKOFF_SECONDS = 900.0
 BACKOFF_FACTOR = 2.0
-PRUNE_EVERY_N_POLLS = 60
+# Retention is scheduled by elapsed time, not by a poll count. Tied to attempts it
+# scaled with the interval: at the supported one-day maximum, "every 60 polls" meant
+# every 60 days, so a 14-day raw window could hold bodies for 73 and the 90-day
+# sample window overshot the same way. Six hours is far finer than either window at
+# any interval, and the work is two indexed DELETEs.
+PRUNE_EVERY = timedelta(hours=6)
 
 # Doublings past which the backoff ceiling has certainly been reached, so the
 # exponent saturates instead of growing until it overflows a float.
@@ -87,7 +92,7 @@ class Poller:
         self._owns_client = client is None
         self._task: asyncio.Task[None] | None = None
         self._stopping = asyncio.Event()
-        self._poll_count = 0
+        self._last_prune_at: datetime | None = None
 
     async def start(self) -> None:
         if self._client is None:
@@ -176,13 +181,12 @@ class Poller:
         """One fetch/parse/store cycle. Records outcome in `status`; never raises."""
         now = datetime.now(UTC)
         self.status.last_attempt_at = now
-        # Counted per attempt, and pruned here rather than on the success path. A
-        # broken endpoint archives a raw body on every poll, and if those bodies
-        # differ -- a timestamped error page is enough -- the archive grows while a
-        # success-only counter never advances, so the advertised 14-day retention
-        # applied precisely never during the outage that was filling it.
-        self._poll_count += 1
-        self._maybe_prune()
+        # Pruned on every attempt, not on the success path. A broken endpoint
+        # archives a raw body on every poll, and if those bodies differ -- a
+        # timestamped error page is enough -- the archive grows while a success-only
+        # trigger never fires, so the advertised retention applied precisely never
+        # during the outage that was filling it.
+        self._maybe_prune(now)
 
         try:
             payload = await self._fetch_with_one_auth_retry()
@@ -238,10 +242,13 @@ class Poller:
 
         return snapshot
 
-    def _maybe_prune(self) -> None:
-        """Apply the retention windows every PRUNE_EVERY_N_POLLS attempts."""
-        if self._poll_count % PRUNE_EVERY_N_POLLS:
+    def _maybe_prune(self, now: datetime) -> None:
+        """Apply the retention windows, at most once per PRUNE_EVERY."""
+        if self._last_prune_at is not None and now - self._last_prune_at < PRUNE_EVERY:
             return
+        # Stamped before the attempt, so a failing prune retries on the schedule
+        # rather than on every single poll.
+        self._last_prune_at = now
         try:
             self.store.prune()
         except Exception:  # noqa: BLE001 - pruning is housekeeping, not critical

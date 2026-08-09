@@ -78,27 +78,34 @@ plutil -lint "$PLIST_DST" >/dev/null || die "generated plist is invalid: $PLIST_
 launchctl bootstrap "gui/$UID" "$PLIST_DST"
 launchctl enable "gui/$UID/$LABEL"
 
+# Both URLs below come from the configured bind address. A wildcard bind answers
+# anywhere, so it gets loopback to probe and the machine's short name to advertise.
+# A specific interface -- a LAN or Tailscale address, an ordinary thing to set here
+# -- answers only on itself: probing 127.0.0.1 failed for the full timeout and
+# reported the service unhealthy when it was fine, and printing `hostname -s` for it
+# advertised a URL that need not resolve to that interface at all.
+case "$HOST" in
+  0.0.0.0 | "::" | "" | "*")
+    PROBE="127.0.0.1"
+    ADVERTISE="$(hostname -s)"
+    ;;
+  *)
+    PROBE="$HOST"
+    ADVERTISE="$HOST"
+    ;;
+esac
+# An IPv6 literal needs brackets in a URL; a hostname or IPv4 address must not
+# have them. A colon is what separates the two cases.
+url_for() { case "$1" in *:*) printf 'http://[%s]:%s' "$1" "$PORT" ;; *) printf 'http://%s:%s' "$1" "$PORT" ;; esac; }
+PROBE_URL="$(url_for "$PROBE")"
+PUBLIC_URL="$(url_for "$ADVERTISE")"
+
 printf '\nInstalled %s\n' "$LABEL"
 printf '  plist : %s\n' "$PLIST_DST"
 printf '  db    : %s\n' "$DB"
 printf '  poll  : every %ss\n' "$INTERVAL"
 printf '  log   : %s\n' "$LOG"
-printf '  url   : http://%s:%s/\n' "$(hostname -s)" "$PORT"
-
-# Probe the address uvicorn is actually listening on. A wildcard bind answers on
-# loopback, but a specific interface -- a LAN or Tailscale address, which is a
-# perfectly ordinary thing to set here -- does not, and probing 127.0.0.1 then
-# failed for the full timeout and reported the service unhealthy when it was fine.
-case "$HOST" in
-  0.0.0.0 | "::" | "" | "*") PROBE="127.0.0.1" ;;
-  *) PROBE="$HOST" ;;
-esac
-# An IPv6 literal needs brackets in a URL; a hostname or IPv4 address must not
-# have them. A colon is what separates the two cases.
-case "$PROBE" in
-  *:*) PROBE_URL="http://[$PROBE]:$PORT" ;;
-  *) PROBE_URL="http://$PROBE:$PORT" ;;
-esac
+printf '  url   : %s/\n' "$PUBLIC_URL"
 
 printf '\nWaiting for the first poll'
 for _ in $(seq 1 20); do

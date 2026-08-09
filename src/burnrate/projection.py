@@ -19,6 +19,7 @@ Two things make this honest rather than misleading:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -26,6 +27,11 @@ from .usage import Bucket
 
 # Below this much elapsed time the rate is dominated by noise.
 MIN_WINDOW_HOURS = 0.5
+
+# Furthest out a crossing time is worth expressing. Only reached when the pace
+# already clears the reset, where the exact date carries no information but the
+# arithmetic still has to produce a representable one.
+CLEARS_RESET_HORIZON_HOURS = 100 * 365 * 24.0
 
 # Period length per bucket family, used to locate the start of the window.
 DEFAULT_PERIOD_HOURS = 168.0
@@ -163,25 +169,47 @@ def project(
             **base,
         )
 
+    # Everything below is ordered so no unrepresentable timestamp is ever built.
+    # `project` runs inside /api/now, so an exception here is not a bad projection,
+    # it is a 500 for the whole dashboard until a later poll replaces the reading.
+    # A utilization of 1e-8 -- a rounding artifact, not an exotic value -- gives a
+    # rate small enough that hours_to_cap leaves timedelta's range, and a subnormal
+    # underflows the rate to zero and divides by it. The reset is the natural bound:
+    # a pace that cannot reach the cap within this period does not need its crossing
+    # time computed exactly, only recognised.
     rate = bucket.utilization / elapsed_hours
-    hours_to_cap = (100.0 - bucket.utilization) / rate
-    hits_cap_at = now + timedelta(hours=hours_to_cap)
+    hours_remaining = (bucket.resets_at - now).total_seconds() / 3600.0
 
-    if hits_cap_at >= bucket.resets_at:
+    if rate <= 0.0 or not math.isfinite(rate):
+        return Projection(
+            status=CLEARS_RESET,
+            message="At this pace the period resets before the cap is reached.",
+            rate_per_hour=rate if math.isfinite(rate) else None,
+            **base,
+        )
+
+    hours_to_cap = (100.0 - bucket.utilization) / rate
+
+    if not math.isfinite(hours_to_cap) or hours_to_cap >= hours_remaining:
+        # Clamped only for the timestamp. `hours_to_cap` keeps the real figure,
+        # however large; the clamp exists because a century from now is already
+        # unambiguously past a reset a week away, and 1e302 hours is not a date.
+        horizon = min(hours_to_cap, CLEARS_RESET_HORIZON_HOURS)
         return Projection(
             status=CLEARS_RESET,
             message="At this pace the period resets before the cap is reached.",
             rate_per_hour=rate,
-            hits_cap_at=hits_cap_at,
-            hours_to_cap=hours_to_cap,
+            hits_cap_at=now + timedelta(hours=horizon) if math.isfinite(horizon) else None,
+            hours_to_cap=hours_to_cap if math.isfinite(hours_to_cap) else None,
             **base,
         )
 
+    # Bounded by construction now: hours_to_cap < hours_remaining <= the period.
     return Projection(
         status=PROJECTED,
         message="At this pace the cap is reached before the period resets.",
         rate_per_hour=rate,
-        hits_cap_at=hits_cap_at,
+        hits_cap_at=now + timedelta(hours=hours_to_cap),
         hours_to_cap=hours_to_cap,
         **base,
     )

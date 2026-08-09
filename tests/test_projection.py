@@ -166,6 +166,40 @@ def test_a_naive_now_is_treated_as_utc():
     assert project(weekly(14.0), now=naive).status == PROJECTED
 
 
+@pytest.mark.parametrize("tiny", [1e-8, 1e-30, 1e-300, 5e-324])
+def test_a_vanishingly_small_utilization_does_not_raise(tiny):
+    """Regression: `project` runs inside /api/now, so this was not a bad projection
+    but a 500 for the whole dashboard until a later poll replaced the reading. A
+    utilization of 1e-8 -- a rounding artifact, not an exotic value -- put
+    hours_to_cap outside timedelta's range, and a subnormal underflowed the rate to
+    zero and divided by it."""
+    projection = project(weekly(tiny), now=NOW)
+
+    assert projection.status == CLEARS_RESET
+    if projection.hits_cap_at is not None:
+        assert projection.hits_cap_at > projection.resets_at
+
+
+def test_the_reported_pace_is_kept_even_when_the_date_is_clamped():
+    """The clamp is for the timestamp only. Throwing away the real figure would
+    hide how slow the burn actually is."""
+    projection = project(weekly(1e-300), now=NOW)
+
+    assert projection.hours_to_cap > 1e300
+    assert projection.rate_per_hour > 0.0
+
+
+@pytest.mark.parametrize("utilization", [1e-8, 0.5, 1.0, 14.0, 50.0, 99.9, 99.999])
+def test_every_accepted_utilization_produces_a_usable_projection(utilization):
+    """The property the crash violated: any value _as_percent will return must go
+    through project() without raising, since /api/now has no handler for it."""
+    projection = project(weekly(utilization), now=NOW)
+
+    assert projection.status in {PROJECTED, CLEARS_RESET}
+    if projection.hits_cap_at is not None:
+        assert projection.hits_cap_at > NOW
+
+
 def test_a_stale_reading_refuses_to_project():
     """Regression: /api/now projected the last known utilization against the
     current clock, so every hour since the sample counted as zero usage. A

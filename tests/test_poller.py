@@ -46,6 +46,19 @@ def _fetches(monkeypatch, handler):
     return seen
 
 
+def _counting_prune(store, monkeypatch):
+    """Count prune calls while still letting the real DELETEs run."""
+    seen = {"n": 0}
+    real = store.prune
+
+    def counted(*args, **kwargs):
+        seen["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(store, "prune", counted)
+    return seen
+
+
 async def test_a_successful_poll_stores_and_clears_error_state(store, monkeypatch, live_response):
     _credentials(monkeypatch, "tok")
     _fetches(monkeypatch, lambda token, n: live_response)
@@ -193,48 +206,68 @@ async def test_a_protocol_error_without_a_body_archives_nothing(store, monkeypat
 
 
 async def test_pruning_happens_even_while_every_poll_is_failing(store, monkeypatch):
-    """Regression: the counter advanced and pruning ran only on the success path,
-    while _archive_unreadable added a row on every failure. A body that differs
-    between attempts -- a timestamped error page is enough -- grew the archive
-    without bound, so the 14-day retention applied precisely never during the
-    outage that was filling it."""
+    """Regression: pruning ran only on the success path, while _archive_unreadable
+    added a row on every failure. A body that differs between attempts -- a
+    timestamped error page is enough -- grew the archive without bound, so retention
+    applied precisely never during the outage that was filling it."""
     _credentials(monkeypatch, "tok")
-    attempt = {"n": 0}
 
     def handler(token, n):
-        attempt["n"] += 1
-        raise UsageProtocolError("not JSON", body=f"<html>error {attempt['n']}</html>")
+        raise UsageProtocolError("not JSON", body=f"<html>error {n}</html>")
 
     _fetches(monkeypatch, handler)
     poller = Poller(store)
-    pruned = {"n": 0}
-    real_prune = store.prune
-    monkeypatch.setattr(
-        store, "prune", lambda *a, **k: (pruned.__setitem__("n", pruned["n"] + 1), real_prune())[1]
-    )
+    pruned = _counting_prune(store, monkeypatch)
 
-    for _ in range(poller_module.PRUNE_EVERY_N_POLLS):
-        await poller.poll_once()
+    await poller.poll_once()
 
-    assert poller.status.consecutive_failures == poller_module.PRUNE_EVERY_N_POLLS
+    assert poller.status.consecutive_failures == 1
     assert pruned["n"] == 1, "retention must not depend on a poll ever succeeding"
 
     with store._connect() as conn:
         rows = conn.execute("SELECT COUNT(*) AS n FROM raw_snapshots").fetchone()["n"]
-    assert rows > 1, "distinct failure bodies are each archived"
+    assert rows == 1
 
 
-async def test_pruning_still_happens_on_the_success_path(store, monkeypatch, live_response):
+async def test_pruning_is_scheduled_by_time_not_by_poll_count(store, monkeypatch, live_response):
+    """Regression: tied to a poll count it scaled with the interval -- at the
+    supported one-day maximum, "every 60 polls" meant every 60 days, so a 14-day raw
+    window could hold bodies for 73 and the 90-day sample window overshot too."""
     _credentials(monkeypatch, "tok")
     _fetches(monkeypatch, lambda token, n: live_response)
-    poller = Poller(store)
-    pruned = {"n": 0}
-    monkeypatch.setattr(store, "prune", lambda *a, **k: pruned.__setitem__("n", pruned["n"] + 1))
+    poller = Poller(store, interval=86400.0)
+    pruned = _counting_prune(store, monkeypatch)
 
-    for _ in range(poller_module.PRUNE_EVERY_N_POLLS):
+    await poller.poll_once()
+    assert pruned["n"] == 1, "the first attempt prunes"
+
+    await poller.poll_once()
+    await poller.poll_once()
+    assert pruned["n"] == 1, "and not again until the window elapses"
+
+    poller._last_prune_at -= poller_module.PRUNE_EVERY
+    await poller.poll_once()
+    assert pruned["n"] == 2, "once PRUNE_EVERY has passed it runs again"
+
+
+async def test_a_failing_prune_retries_on_schedule_not_on_every_poll(store, monkeypatch):
+    """Stamping the attempt rather than the success keeps a broken prune from running
+    two indexed DELETEs on every single poll."""
+    _credentials(monkeypatch, "tok")
+    _fetches(monkeypatch, lambda token, n: {"nothing": "usable"})
+    poller = Poller(store)
+    calls = {"n": 0}
+
+    def boom(*a, **k):
+        calls["n"] += 1
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "prune", boom)
+
+    for _ in range(5):
         await poller.poll_once()
 
-    assert pruned["n"] == 1
+    assert calls["n"] == 1
 
 
 async def test_a_failed_archive_does_not_replace_the_schema_diagnosis(store, monkeypatch):
