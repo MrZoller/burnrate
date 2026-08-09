@@ -458,6 +458,12 @@ body {
   margin-top: 12px;
 }
 
+/* Says so, rather than leaving a header over nothing. */
+.table__empty {
+  color: var(--ink-muted);
+  font-style: italic;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;

@@ -687,6 +687,17 @@ async function refreshHistory() {
     renderCharts(state.history);
   } catch (error) {
     if (token !== historyRequest) return;
+    // The cached payload goes too. Leaving it meant the table kept listing the
+    // previous window's figures while the chart beside it said history was
+    // unavailable, and the outage path would later redraw those same cached points
+    // -- so a failed fetch after a range change left real numbers on screen for a
+    // window nobody had asked for.
+    state.history = null;
+    els.historyBody.replaceChildren(
+      el("tr", {}, [
+        el("td", { colspan: "6", class: "table__empty", text: "History unavailable." }),
+      ]),
+    );
     els.charts.replaceChildren(
       el("div", { class: "chart" }, [
         el("div", { class: "chart__empty", text: `History unavailable: ${error.message}` }),

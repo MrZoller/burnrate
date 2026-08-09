@@ -119,6 +119,40 @@ async def test_a_401_with_an_unchanged_token_gives_up_rather_than_refreshing(sto
     assert poller.status.last_error_kind == "auth"
 
 
+async def test_the_credential_read_does_not_block_the_event_loop(store, monkeypatch, live_response):
+    """Regression: `read_credential` shells out to `security` twice at a 10-second
+    timeout each, so on a machine waiting for keychain authorization the poll held
+    the event loop for up to 20 seconds and every API and static request froze with
+    it. The handlers are sync `def` precisely so Starlette threadpools their blocking
+    work; blocking the loop from the background task undid that.
+    """
+    import time
+
+    def slow_read():
+        time.sleep(0.3)
+        return Credential(access_token="tok", source="file")
+
+    monkeypatch.setattr(poller_module, "read_credential", slow_read)
+    _fetches(monkeypatch, lambda token, n: live_response)
+    poller = Poller(store)
+
+    ticks = {"n": 0}
+    stop = asyncio.Event()
+
+    async def heartbeat():
+        while not stop.is_set():
+            await asyncio.sleep(0.01)
+            ticks["n"] += 1
+
+    beat = asyncio.create_task(heartbeat())
+    await poller.poll_once()
+    stop.set()
+    await beat
+
+    assert poller.status.healthy
+    assert ticks["n"] > 5, f"the loop only ran {ticks['n']} times; the read blocked it"
+
+
 async def test_a_missing_credential_is_recorded_not_raised(store, monkeypatch):
     def boom():
         raise CredentialError("no credential anywhere")

@@ -277,13 +277,21 @@ class Poller:
         Claude Code may have rotated the token between our read and the request.
         One re-read covers that race. We never mint or refresh a token ourselves;
         a second 401 means the data is stale and we say so.
+
+        The reads go to a worker thread because `read_credential` shells out to
+        `security`, twice, at a 10-second timeout each -- so on a machine waiting for
+        keychain authorization it could hold the event loop for 20 seconds per poll.
+        The request handlers are deliberately sync `def` so Starlette threadpools
+        their blocking SQLite reads for exactly this reason; blocking the loop from
+        the background task undid that, and every API and static request froze with
+        it while the credential read was ultimately going to succeed from the file.
         """
-        credential = read_credential()
+        credential = await asyncio.to_thread(read_credential)
         self.status.credential_source = credential.source
         try:
             return await fetch_usage(credential.access_token, client=self._client)
         except UsageAuthError:
-            retry = read_credential()
+            retry = await asyncio.to_thread(read_credential)
             self.status.credential_source = retry.source
             if retry.access_token == credential.access_token:
                 raise UsageAuthError(
