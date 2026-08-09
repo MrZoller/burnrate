@@ -46,9 +46,11 @@ into your GUI session, and waits for the first successful poll. To remove it:
 
 Override defaults with `BURNRATE_DB`, `BURNRATE_HOST`, `BURNRATE_PORT`, and
 `BURNRATE_POLL_INTERVAL` — set them before running `install.sh` and they get
-baked into the plist. A relative `BURNRATE_DB` is resolved against the directory
-you run `install.sh` from and stored absolute, so `uninstall.sh --purge` later
-deletes the same file the agent was writing.
+baked into the plist, after the same validation the app itself applies — an
+unusable port or interval falls back to the default rather than being installed
+verbatim. `BURNRATE_DB` is expanded and made absolute (relative to where you run
+`install.sh`), so the agent, a foreground run, and `uninstall.sh --purge` all
+mean the same file.
 
 ### Tests
 

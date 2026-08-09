@@ -53,13 +53,33 @@ class Config:
     @classmethod
     def from_env(cls) -> Config:
         return cls(
-            db_path=Path(os.environ.get("BURNRATE_DB", str(DEFAULT_DB_PATH))).expanduser(),
+            db_path=_db_path_env(),
             host=os.environ.get("BURNRATE_HOST", DEFAULT_HOST),
             port=_int_env("BURNRATE_PORT", DEFAULT_PORT, 1, 65535),
             poll_interval=_positive_float_env(
                 "BURNRATE_POLL_INTERVAL", 60.0, MAX_POLL_INTERVAL_SECONDS
             ),
         )
+
+
+def _db_path_env() -> Path:
+    """The database path, expanded and absolute.
+
+    Absolute because three different processes have to agree on which file it is:
+    the agent, whose cwd is the plist's WorkingDirectory; a foreground `uv run
+    burnrate`; and `uninstall.sh --purge`, which resolves whatever the plist
+    recorded against its own cwd. A relative path meant purge could delete
+    something else and leave the real database behind.
+
+    Expansion happens before that, and it happens here rather than in shell so
+    there is one implementation. `install.sh` used to anchor relative paths itself
+    and turned a quoted BURNRATE_DB='~/private/burnrate.db' into
+    `$PWD/~/private/burnrate.db`, while expanduser() gave `$HOME/private/...` --
+    the same configuration naming two different files depending on how it was run.
+    Python also handles `~user`, which shell string-matching would not.
+    """
+    raw = Path(os.environ.get("BURNRATE_DB", str(DEFAULT_DB_PATH))).expanduser()
+    return raw if raw.is_absolute() else Path.cwd() / raw
 
 
 def print_effective(stream: TextIO | None = None) -> None:
@@ -71,11 +91,12 @@ def print_effective(stream: TextIO | None = None) -> None:
     environment, so a BURNRATE_PORT of "abc" went into the plist and into the probe
     URL while `from_env` quietly rejected it and the agent listened on 8377.
 
-    Order is the contract -- host, port, interval -- and is pinned by a test,
+    Order is the contract -- db, host, port, interval -- and is pinned by a test,
     because a silent reordering here would misconfigure the agent rather than fail.
     """
     config = Config.from_env()
     out = stream if stream is not None else sys.stdout
+    print(config.db_path, file=out)
     print(config.host, file=out)
     print(config.port, file=out)
     print(config.poll_interval, file=out)

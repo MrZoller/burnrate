@@ -68,6 +68,64 @@ def test_an_unrecognized_bucket_does_not_raise_a_warning(live_response):
     assert snapshot.notices != ()
 
 
+TOKEN = "sk-ant-oat01-a-real-looking-token-abc123"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(
+            {"five_hour": {"utilization": 12}, "seven_day": {"utilization": TOKEN}},
+            id="malformed-utilization",
+        ),
+        pytest.param(
+            {"five_hour": {"utilization": 12, "resets_at": TOKEN}},
+            id="malformed-resets-at",
+        ),
+        pytest.param(
+            {"five_hour": {"utilization": 12}, TOKEN: {"utilization": 5}},
+            id="token-as-a-bucket-key",
+        ),
+        pytest.param(
+            {"limits": [{"kind": "session", "percent": TOKEN}]},
+            id="malformed-percent-in-limits",
+        ),
+    ],
+)
+def test_a_credential_in_the_response_never_survives_parsing(payload):
+    """The project rule is that the token is never logged, never written to the
+    database, and never in an API response -- and diagnostics quote the values they
+    could not read. Three separate paths carried it: /api/now serves warnings and
+    notices to the browser, `last_error` is logged when no bucket survives, and a
+    bucket's key and label are columns in the samples table."""
+    snapshot = parse_usage(payload)
+
+    rendered = " ".join(
+        [
+            *snapshot.warnings,
+            *snapshot.notices,
+            *(b.key for b in snapshot.buckets),
+            *(b.label for b in snapshot.buckets),
+        ]
+    )
+    assert TOKEN not in rendered
+    assert "sk-ant" not in rendered
+
+
+def test_scrubbing_leaves_an_ordinary_response_untouched(live_response):
+    """It must be a no-op on real data -- the fixture asserts no warnings elsewhere,
+    and a scrub that altered bucket keys would break identity and dedup."""
+    snapshot = parse_usage(live_response)
+
+    assert [b.key for b in snapshot.buckets] == [
+        "five_hour",
+        "seven_day",
+        "seven_day_fable",
+        "nimbus_quill",
+    ]
+    assert snapshot.warnings == ()
+
+
 def test_a_malformed_field_is_a_warning_not_a_notice():
     snapshot = parse_usage({"five_hour": {"utilization": 10, "resets_at": 12345}})
 

@@ -192,6 +192,51 @@ async def test_a_protocol_error_without_a_body_archives_nothing(store, monkeypat
     assert poller.status.last_error_kind == "protocol"
 
 
+async def test_pruning_happens_even_while_every_poll_is_failing(store, monkeypatch):
+    """Regression: the counter advanced and pruning ran only on the success path,
+    while _archive_unreadable added a row on every failure. A body that differs
+    between attempts -- a timestamped error page is enough -- grew the archive
+    without bound, so the 14-day retention applied precisely never during the
+    outage that was filling it."""
+    _credentials(monkeypatch, "tok")
+    attempt = {"n": 0}
+
+    def handler(token, n):
+        attempt["n"] += 1
+        raise UsageProtocolError("not JSON", body=f"<html>error {attempt['n']}</html>")
+
+    _fetches(monkeypatch, handler)
+    poller = Poller(store)
+    pruned = {"n": 0}
+    real_prune = store.prune
+    monkeypatch.setattr(
+        store, "prune", lambda *a, **k: (pruned.__setitem__("n", pruned["n"] + 1), real_prune())[1]
+    )
+
+    for _ in range(poller_module.PRUNE_EVERY_N_POLLS):
+        await poller.poll_once()
+
+    assert poller.status.consecutive_failures == poller_module.PRUNE_EVERY_N_POLLS
+    assert pruned["n"] == 1, "retention must not depend on a poll ever succeeding"
+
+    with store._connect() as conn:
+        rows = conn.execute("SELECT COUNT(*) AS n FROM raw_snapshots").fetchone()["n"]
+    assert rows > 1, "distinct failure bodies are each archived"
+
+
+async def test_pruning_still_happens_on_the_success_path(store, monkeypatch, live_response):
+    _credentials(monkeypatch, "tok")
+    _fetches(monkeypatch, lambda token, n: live_response)
+    poller = Poller(store)
+    pruned = {"n": 0}
+    monkeypatch.setattr(store, "prune", lambda *a, **k: pruned.__setitem__("n", pruned["n"] + 1))
+
+    for _ in range(poller_module.PRUNE_EVERY_N_POLLS):
+        await poller.poll_once()
+
+    assert pruned["n"] == 1
+
+
 async def test_a_failed_archive_does_not_replace_the_schema_diagnosis(store, monkeypatch):
     """Losing the archive copy is a footnote; the reported error must still be
     the schema break, not a database complaint about storing it."""

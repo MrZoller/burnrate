@@ -176,6 +176,13 @@ class Poller:
         """One fetch/parse/store cycle. Records outcome in `status`; never raises."""
         now = datetime.now(UTC)
         self.status.last_attempt_at = now
+        # Counted per attempt, and pruned here rather than on the success path. A
+        # broken endpoint archives a raw body on every poll, and if those bodies
+        # differ -- a timestamped error page is enough -- the archive grows while a
+        # success-only counter never advances, so the advertised 14-day retention
+        # applied precisely never during the outage that was filling it.
+        self._poll_count += 1
+        self._maybe_prune()
 
         try:
             payload = await self._fetch_with_one_auth_retry()
@@ -229,14 +236,16 @@ class Poller:
         self.status.warnings = snapshot.warnings
         self.status.notices = snapshot.notices
 
-        self._poll_count += 1
-        if self._poll_count % PRUNE_EVERY_N_POLLS == 0:
-            try:
-                self.store.prune()
-            except Exception:  # noqa: BLE001 - pruning is housekeeping, not critical
-                logger.exception("prune failed")
-
         return snapshot
+
+    def _maybe_prune(self) -> None:
+        """Apply the retention windows every PRUNE_EVERY_N_POLLS attempts."""
+        if self._poll_count % PRUNE_EVERY_N_POLLS:
+            return
+        try:
+            self.store.prune()
+        except Exception:  # noqa: BLE001 - pruning is housekeeping, not critical
+            logger.exception("prune failed")
 
     def _archive_unreadable(self, body: Any, ts: datetime) -> None:
         """Keep the body that broke the parser, without letting that failure win.

@@ -27,6 +27,8 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
+from .redact import scrub
+
 # Top-level keys that are shaped like buckets but are not rate limits.
 NON_BUCKET_KEYS = frozenset(
     {
@@ -116,13 +118,31 @@ def parse_usage(payload: Any, fetched_at: datetime | None = None) -> UsageSnapsh
     if not buckets:
         warnings.append("no usable buckets in response")
 
-    ordered = tuple(sorted(buckets.values(), key=lambda b: b.sort_key))
+    # Scrubbed here, at the one point everything leaves the parser, rather than at
+    # each place a message is built. Diagnostics quote the values they could not
+    # read, and bucket keys and labels are response-derived too, so a token
+    # arriving in a malformed `utilization`, in a `resets_at`, or as a top-level key
+    # reached three separate places it is forbidden to be: /api/now serves warnings
+    # and notices to the browser, `last_error` is logged when no bucket survives,
+    # and key and label are columns in the samples table. One choke point also means
+    # a diagnostic added later is covered without anyone remembering to.
+    ordered = tuple(
+        sorted((_scrubbed(b) for b in buckets.values()), key=lambda b: b.sort_key),
+    )
     return UsageSnapshot(
         buckets=ordered,
-        warnings=tuple(warnings),
-        notices=tuple(notices),
+        warnings=tuple(scrub(w) for w in warnings),
+        notices=tuple(scrub(n) for n in notices),
         fetched_at=fetched_at,
     )
+
+
+def _scrubbed(bucket: Bucket) -> Bucket:
+    """A bucket whose response-derived identity carries no credential."""
+    key, label = scrub(bucket.key), scrub(bucket.label)
+    if key == bucket.key and label == bucket.label:
+        return bucket
+    return replace(bucket, key=key, label=label)
 
 
 def _collect_from_limits(limits: Any, buckets: dict[str, Bucket], warnings: list[str]) -> None:

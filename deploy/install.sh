@@ -12,17 +12,6 @@ PLIST_DST="$HOME/Library/LaunchAgents/$LABEL.plist"
 PYTHON="$REPO/.venv/bin/python"
 LOG="$HOME/Library/Logs/burnrate.log"
 
-DB="${BURNRATE_DB:-$HOME/.local/share/burnrate/burnrate.db}"
-# Absolute, always. A relative path is resolved by the agent against the plist's
-# WorkingDirectory ($REPO) but by `uninstall.sh --purge` against whatever
-# directory the uninstaller was run from -- so purge would miss the real database
-# and could delete an unrelated file of the same name somewhere else. Anchoring
-# it here to the invoking shell's cwd, which is what a user setting a relative
-# BURNRATE_DB means, makes every consumer agree on one path.
-case "$DB" in
-  /*) ;;
-  *) DB="$PWD/$DB" ;;
-esac
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 
 [ "$(uname -s)" = "Darwin" ] || die "launchd is macOS-only; run 'uv run burnrate' directly elsewhere"
@@ -37,22 +26,27 @@ fi
 
 "$PYTHON" -c 'import burnrate' 2>/dev/null || die "burnrate is not importable — run 'uv sync' in $REPO"
 
-# The effective settings come from the package, not from a second copy of its
-# validation rules written in shell. The installer used to keep whatever was in the
+# Every effective setting comes from the package, not from a second copy of its
+# rules written in shell. The installer used to keep whatever was in the
 # environment, so a BURNRATE_PORT of "abc" or 99999 went into the plist and into the
 # readiness URL while Config.from_env quietly rejected it and the agent listened on
 # 8377 -- healthy service, installer probing a port nobody was on, wrong URL
-# printed. Asking the package makes the two agree by construction rather than by
-# my keeping two implementations in step.
+# printed. The database path had the same split: absolutizing it here turned a
+# quoted BURNRATE_DB='~/private/burnrate.db' into $PWD/~/private/burnrate.db while
+# expanduser() gave $HOME/private/..., so the agent and a foreground run named
+# different files. Asking the package makes them agree by construction instead of
+# by my keeping two implementations in step -- and Python handles `~user`, which
+# shell string-matching would not.
 #
 # launchd also starts the agent with none of this shell's environment, so whatever
 # comes back here has to be baked into the plist or it is simply absent at runtime.
-EFFECTIVE=$(BURNRATE_DB="$DB" "$PYTHON" -m burnrate.config) \
+EFFECTIVE=$("$PYTHON" -m burnrate.config) \
   || die "could not read the effective configuration"
-{ read -r HOST; read -r PORT; read -r INTERVAL; } <<EOF
+{ read -r DB; read -r HOST; read -r PORT; read -r INTERVAL; } <<EOF
 $EFFECTIVE
 EOF
-[ -n "$HOST" ] && [ -n "$PORT" ] && [ -n "$INTERVAL" ] || die "incomplete configuration: $EFFECTIVE"
+[ -n "$DB" ] && [ -n "$HOST" ] && [ -n "$PORT" ] && [ -n "$INTERVAL" ] \
+  || die "incomplete configuration: $EFFECTIVE"
 
 mkdir -p "$HOME/Library/LaunchAgents" "$(dirname "$LOG")" "$(dirname "$DB")"
 

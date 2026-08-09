@@ -54,6 +54,30 @@ def test_a_tilde_in_the_db_path_is_expanded(monkeypatch):
     assert config.db_path.is_absolute()
 
 
+@pytest.mark.parametrize("raw", ["rel/sub.db", "sub.db", "./x.db"])
+def test_a_relative_db_path_is_made_absolute(monkeypatch, raw):
+    """Three processes have to agree which file this is: the agent, a foreground
+    run, and `uninstall.sh --purge`, which resolves the recorded path against its
+    own cwd. A relative one meant purge could delete something else and leave the
+    real database behind."""
+    monkeypatch.setenv("BURNRATE_DB", raw)
+
+    assert Config.from_env().db_path.is_absolute()
+
+
+def test_a_tilde_path_is_absolute_and_not_anchored_to_the_cwd(monkeypatch):
+    """Regression: install.sh anchored relative paths itself, so a quoted
+    BURNRATE_DB='~/private/burnrate.db' became $PWD/~/private/burnrate.db while
+    expanduser() gave $HOME/private/... -- one configuration, two different files
+    depending on how the service was started."""
+    monkeypatch.setenv("BURNRATE_DB", "~/private/burnrate.db")
+
+    path = Config.from_env().db_path
+
+    assert path == Path.home() / "private" / "burnrate.db"
+    assert "~" not in str(path)
+
+
 def test_garbage_numbers_fall_back_rather_than_crashing_at_boot(monkeypatch):
     """A typo in the plist must not stop the service from starting."""
     monkeypatch.setenv("BURNRATE_PORT", "not-a-port")
@@ -137,7 +161,7 @@ def test_the_freshness_window_never_drops_below_the_floor():
 
 
 def test_print_effective_order_is_the_installers_contract(monkeypatch, capsys):
-    """install.sh reads these three lines positionally, so a reordering here would
+    """install.sh reads these four lines positionally, so a reordering here would
     silently misconfigure the agent instead of failing. Pinned rather than trusted."""
     monkeypatch.setenv("BURNRATE_HOST", "127.0.0.1")
     monkeypatch.setenv("BURNRATE_PORT", "9999")
@@ -145,7 +169,9 @@ def test_print_effective_order_is_the_installers_contract(monkeypatch, capsys):
 
     print_effective()
 
-    assert capsys.readouterr().out.splitlines() == ["127.0.0.1", "9999", "15.0"]
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[1:] == ["127.0.0.1", "9999", "15.0"]
+    assert Path(lines[0]).is_absolute(), "the db path comes first and is absolute"
 
 
 @pytest.mark.parametrize("bad_port", ["abc", "0", "99999", "-1"])
@@ -157,7 +183,7 @@ def test_the_installer_is_told_the_port_the_app_will_really_use(monkeypatch, cap
 
     print_effective()
 
-    assert capsys.readouterr().out.splitlines()[1] == str(DEFAULT_PORT)
+    assert capsys.readouterr().out.splitlines()[2] == str(DEFAULT_PORT)
 
 
 def test_print_effective_is_runnable_as_a_module(monkeypatch):
@@ -175,7 +201,7 @@ def test_print_effective_is_runnable_as_a_module(monkeypatch):
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.splitlines() == [DEFAULT_HOST, str(DEFAULT_PORT), "60.0"]
+    assert result.stdout.splitlines()[1:] == [DEFAULT_HOST, str(DEFAULT_PORT), "60.0"]
 
 
 def test_the_default_binding_is_lan_reachable():
