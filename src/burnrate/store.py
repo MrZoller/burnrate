@@ -21,6 +21,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from .redact import scrub_json
 from .usage import UsageSnapshot
 
 SCHEMA = """
@@ -132,8 +133,15 @@ class Store:
         body. Skipping the duplicates keeps the archive to a few hundred rows a
         week instead of ten thousand.
         """
+        # Scrubbed on the way in, because this row is the one place the token is
+        # forbidden to reach and the only path that was not already covered: an
+        # error excerpt is scrubbed by the client, but a decoded payload with
+        # buckets in it went to json.dumps untouched. Nothing observed echoes the
+        # credential today -- the reason to do it here is that this archive exists
+        # to capture response shapes we have not seen, and a field echoing the
+        # token back is exactly such a shape.
         try:
-            body = json.dumps(raw_body, sort_keys=True, separators=(",", ":"))
+            body = json.dumps(scrub_json(raw_body), sort_keys=True, separators=(",", ":"))
         except (TypeError, ValueError):
             return
 

@@ -163,7 +163,14 @@ class Poller:
         # back. MAX_BACKOFF_STEPS is far above what any sane interval needs to
         # reach the ceiling, and far below where the exponent overflows.
         steps = min(failures - 1, MAX_BACKOFF_STEPS)
-        return min(self.interval * (BACKOFF_FACTOR**steps), MAX_BACKOFF_SECONDS)
+        # The ceiling can never fall below the configured interval. A flat 900s cap
+        # made backoff run backwards for any interval above it: an hourly poll
+        # became a 15-minute one on its first failure, so the response to an
+        # endpoint that was failing or rate-limiting us was to ask four times as
+        # often. Retrying is allowed to be no gentler than normal polling; it must
+        # never be more aggressive.
+        ceiling = max(MAX_BACKOFF_SECONDS, self.interval)
+        return min(self.interval * (BACKOFF_FACTOR**steps), ceiling)
 
     async def poll_once(self) -> UsageSnapshot | None:
         """One fetch/parse/store cycle. Records outcome in `status`; never raises."""

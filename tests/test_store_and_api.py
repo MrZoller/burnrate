@@ -1,5 +1,6 @@
 """Store round-trips and the two JSON endpoints."""
 
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -234,6 +235,40 @@ def test_the_newest_sample_survives_every_cap(store):
     for max_points in (1, 5, 720):
         points = store.history(hours=3, max_points=max_points)
         assert points[-1].utilization == 119.0
+
+
+def test_a_token_echoed_in_a_payload_never_reaches_the_database(store, live_response):
+    """The project's hardest rule, on the one path that was not covered: an error
+    excerpt is scrubbed by the client, but a decoded payload with usable buckets
+    went to json.dumps untouched. Nothing observed echoes the credential -- this
+    archive exists to capture shapes we have not seen, and a field handing the
+    token back is exactly such a shape."""
+    token = "sk-ant-oat01-example-token-value"
+    live_response["debug_echo"] = {"authorization": f"Bearer {token}"}
+
+    store.append_snapshot(parse_usage(live_response, fetched_at=NOW), raw_body=live_response)
+
+    with store._connect() as conn:
+        bodies = [row["body"] for row in conn.execute("SELECT body FROM raw_snapshots")]
+
+    assert bodies, "the body should still be archived, just scrubbed"
+    assert token not in bodies[0]
+    assert "sk-ant" not in bodies[0]
+    # And it is still the JSON it was, minus the secret.
+    assert json.loads(bodies[0])["debug_echo"]["authorization"] == "Bearer <redacted>"
+
+
+def test_scrubbing_does_not_disturb_an_ordinary_body(store, live_response):
+    """Dedup compares serialized bodies, so scrubbing must be a no-op on a payload
+    without secrets, or every poll would look like a change and archive a new row."""
+    snapshot = parse_usage(live_response, fetched_at=NOW)
+    for _ in range(3):
+        store.append_snapshot(snapshot, raw_body=live_response)
+
+    with store._connect() as conn:
+        count = conn.execute("SELECT COUNT(*) AS n FROM raw_snapshots").fetchone()["n"]
+
+    assert count == 1
 
 
 def test_a_raw_body_can_be_archived_without_samples(store):

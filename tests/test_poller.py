@@ -277,6 +277,27 @@ def test_backoff_honours_a_custom_interval(store):
     assert poller.next_delay() == 20.0
 
 
+@pytest.mark.parametrize("interval", [901.0, 3600.0, 86400.0])
+def test_backoff_never_polls_more_often_than_configured(store, interval):
+    """Regression: the ceiling was a flat 900s, so any interval above it got
+    SHORTER on the first failure -- an hourly poll became a 15-minute one, asking
+    four times as often precisely while the endpoint was failing or rate-limiting.
+    Retrying may be no gentler than normal polling; it must never be harsher."""
+    poller = Poller(store, interval=interval)
+
+    for failures in (0, 1, 2, 10, 1000):
+        poller.status.consecutive_failures = failures
+        assert poller.next_delay() >= interval, f"{failures} failures shortened the interval"
+
+
+def test_a_short_interval_still_backs_off_to_the_usual_ceiling(store):
+    """The ordinary case must be untouched by the fix above."""
+    poller = Poller(store, interval=60.0)
+    poller.status.consecutive_failures = 20
+
+    assert poller.next_delay() == MAX_BACKOFF_SECONDS
+
+
 @pytest.mark.parametrize("failures", [1024, 1025, 5000, 10**6])
 def test_backoff_survives_an_enormous_failure_count(store, failures):
     """Regression: the exponent was raised before min() could cap it, so

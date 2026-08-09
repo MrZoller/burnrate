@@ -7,15 +7,26 @@ churn (protocol). Nothing here logs or embeds the token.
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 import httpx
 
-# Anything shaped like an Anthropic credential, redacted from diagnostics even
-# when we did not put it there.
-_SECRET_PATTERN = re.compile(r"sk-ant-[A-Za-z0-9_\-]+")
-REDACTED = "<redacted>"
+from .redact import REDACTED, scrub
+
+__all__ = [
+    "ARCHIVE_BODY_LIMIT",
+    "ERROR_BODY_LIMIT",
+    "OAUTH_BETA",
+    "REDACTED",
+    "USAGE_URL",
+    "UsageAuthError",
+    "UsageFetchError",
+    "UsageHTTPError",
+    "UsageProtocolError",
+    "UsageTransportError",
+    "build_headers",
+    "fetch_usage",
+]
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 OAUTH_BETA = "oauth-2025-04-20"
@@ -120,6 +131,4 @@ def _short_body(response: httpx.Response, secret: str = "", limit: int = ERROR_B
         excerpt = response.text[:limit].replace("\n", " ").strip()
     except Exception:  # pragma: no cover - defensive
         return ""
-    if secret:
-        excerpt = excerpt.replace(secret, REDACTED)
-    return _SECRET_PATTERN.sub(REDACTED, excerpt)
+    return scrub(excerpt, secret)
