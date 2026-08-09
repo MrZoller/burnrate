@@ -277,6 +277,43 @@ def test_backoff_honours_a_custom_interval(store):
     assert poller.next_delay() == 20.0
 
 
+@pytest.mark.parametrize("failures", [1024, 1025, 5000, 10**6])
+def test_backoff_survives_an_enormous_failure_count(store, failures):
+    """Regression: the exponent was raised before min() could cap it, so
+    BACKOFF_FACTOR ** 1024 raised OverflowError at 1025 consecutive failures --
+    about eleven days at the capped cadence, i.e. a machine left running with an
+    expired credential. next_delay() is called outside poll_once's handler, so the
+    task died there and would not resume when the credential came back."""
+    poller = Poller(store, interval=60.0)
+    poller.status.consecutive_failures = failures
+
+    assert poller.next_delay() == MAX_BACKOFF_SECONDS
+
+
+def test_the_loop_survives_a_delay_it_cannot_compute(store, monkeypatch):
+    """Both known causes are fixed; this pins the property they violated. The
+    delay arithmetic sits outside poll_once, so anything escaping it ends the loop
+    for good -- one mistimed poll is the acceptable cost, every future poll is not."""
+    poller = Poller(store, interval=60.0)
+
+    def boom():
+        raise OverflowError("result too large")
+
+    monkeypatch.setattr(poller, "next_delay", boom)
+
+    assert poller._schedule_next() == 60.0
+    assert poller.status.next_attempt_at is None
+
+
+def test_a_scheduled_delay_is_recorded_for_the_ui(store):
+    poller = Poller(store, interval=30.0)
+
+    delay = poller._schedule_next()
+
+    assert delay == 30.0
+    assert poller.status.next_attempt_at is not None
+
+
 async def test_the_loop_backs_off_after_a_failure(store, monkeypatch, live_response):
     """Exercises _run itself, not a re-derivation of its arithmetic."""
     _credentials(monkeypatch, "tok")
@@ -306,6 +343,43 @@ async def test_the_loop_backs_off_after_a_failure(store, monkeypatch, live_respo
 
     # First failure -> 60s, second failure -> 120s, then a success drops it back.
     assert waits[:3] == [60.0, 120.0, 60.0]
+
+
+async def test_the_loop_recovers_after_a_fortnight_of_failures(store, monkeypatch, live_response):
+    """The consequence the arithmetic fix exists for, asserted as behaviour: after
+    the failure count passes the old overflow point, the credential coming back
+    must produce a successful poll. Before the fix the task was already dead and
+    nothing after this point ever ran again."""
+    _credentials(monkeypatch, "tok")
+    waits: list[float] = []
+    outcome = {"fail": True}
+
+    def handler(token, n):
+        if outcome["fail"]:
+            raise UsageTransportError("endpoint down")
+        return live_response
+
+    _fetches(monkeypatch, handler)
+    poller = Poller(store, interval=60.0)
+    # Eleven days of failures already behind us, one past where 2.0**n overflowed.
+    poller.status.consecutive_failures = 1025
+
+    async def fake_wait_for(awaitable, timeout):
+        waits.append(timeout)
+        awaitable.close()
+        if len(waits) >= 2:
+            poller._stopping.set()
+            return True
+        outcome["fail"] = False  # the credential comes back
+        raise TimeoutError
+
+    monkeypatch.setattr(poller_module.asyncio, "wait_for", fake_wait_for)
+    await poller._run()
+
+    assert waits[0] == MAX_BACKOFF_SECONDS, "should still be at the ceiling, not crashed"
+    assert poller.status.last_success_at is not None, "the loop must recover"
+    assert poller.status.consecutive_failures == 0
+    assert store.latest_per_bucket(), "and it must have stored the recovered reading"
 
 
 async def test_the_loop_polls_then_stops_cleanly(store, monkeypatch, live_response):

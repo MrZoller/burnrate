@@ -32,6 +32,10 @@ MAX_BACKOFF_SECONDS = 900.0
 BACKOFF_FACTOR = 2.0
 PRUNE_EVERY_N_POLLS = 60
 
+# Doublings past which the backoff ceiling has certainly been reached, so the
+# exponent saturates instead of growing until it overflows a float.
+MAX_BACKOFF_STEPS = 64
+
 
 @dataclass
 class PollerStatus:
@@ -116,8 +120,27 @@ class Poller:
 
             await self.poll_once()
 
+            delay = self._schedule_next()
+
+    def _schedule_next(self) -> float:
+        """The next delay, computed so that nothing here can end the loop.
+
+        `poll_once` is careful to never raise; this arithmetic sat outside it and
+        was not, and twice now an OverflowError here has been what killed the poll
+        task -- once from a non-finite configured interval, once from the backoff
+        exponent after eleven days of failures. Both root causes are fixed, but a
+        loop that must run for months should not depend on having enumerated every
+        way multiplying two numbers can go wrong. A bad delay costs one mistimed
+        poll; an escaping exception costs every poll after it.
+        """
+        try:
             delay = self.next_delay()
             self.status.next_attempt_at = datetime.now(UTC) + timedelta(seconds=delay)
+            return delay
+        except Exception:  # noqa: BLE001 - the loop outliving this is the point
+            logger.exception("could not compute the next poll delay; using the interval")
+            self.status.next_attempt_at = None
+            return POLL_INTERVAL_SECONDS
 
     def next_delay(self) -> float:
         """Seconds to wait before the next attempt.
@@ -130,7 +153,17 @@ class Poller:
         failures = self.status.consecutive_failures
         if not failures:
             return self.interval
-        return min(self.interval * (BACKOFF_FACTOR ** (failures - 1)), MAX_BACKOFF_SECONDS)
+        # Saturate the exponent before raising to it. Once the ceiling applies the
+        # exact value is irrelevant, but the arithmetic still has to happen, and
+        # BACKOFF_FACTOR ** 1024 raises OverflowError -- reached after 1025
+        # consecutive failures, about eleven days at the capped cadence. That is
+        # an ordinary situation, not an exotic one: a machine left running with an
+        # expired credential. The failure was that this runs outside poll_once's
+        # handler, so the task died and would not resume when the credential came
+        # back. MAX_BACKOFF_STEPS is far above what any sane interval needs to
+        # reach the ceiling, and far below where the exponent overflows.
+        steps = min(failures - 1, MAX_BACKOFF_STEPS)
+        return min(self.interval * (BACKOFF_FACTOR**steps), MAX_BACKOFF_SECONDS)
 
     async def poll_once(self) -> UsageSnapshot | None:
         """One fetch/parse/store cycle. Records outcome in `status`; never raises."""

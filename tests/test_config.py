@@ -9,7 +9,12 @@ from pathlib import Path
 
 import pytest
 
-from burnrate.config import DEFAULT_HOST, DEFAULT_PORT, Config
+from burnrate.config import (
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    MAX_POLL_INTERVAL_SECONDS,
+    Config,
+)
 
 
 def test_defaults_when_nothing_is_set(monkeypatch):
@@ -74,6 +79,22 @@ def test_a_usable_interval_is_still_honoured(monkeypatch):
     assert Config.from_env().poll_interval == 0.5
 
 
+@pytest.mark.parametrize("bad", ["1e20", "1e30", "86400.001", "999999999999"])
+def test_an_absurdly_large_interval_falls_back_to_the_default(monkeypatch, bad):
+    """Finiteness was not enough. 1e20 is finite and positive, so it passed the
+    earlier guard, then reached the same timedelta() in the poll loop and raised
+    the same OverflowError in the same place with nothing to catch it."""
+    monkeypatch.setenv("BURNRATE_POLL_INTERVAL", bad)
+
+    assert Config.from_env().poll_interval == 60.0
+
+
+def test_the_largest_accepted_interval_is_honoured(monkeypatch):
+    monkeypatch.setenv("BURNRATE_POLL_INTERVAL", str(MAX_POLL_INTERVAL_SECONDS))
+
+    assert Config.from_env().poll_interval == MAX_POLL_INTERVAL_SECONDS
+
+
 @pytest.mark.parametrize("bad", ["0", "-1", "65536", "99999"])
 def test_an_out_of_range_port_falls_back_to_the_default(monkeypatch, bad):
     monkeypatch.setenv("BURNRATE_PORT", bad)
@@ -86,7 +107,7 @@ def test_every_configured_interval_survives_timedelta(monkeypatch):
     raise where the poll loop uses it."""
     from datetime import timedelta
 
-    for value in ("0", "nan", "inf", "abc", "30"):
+    for value in ("0", "nan", "inf", "abc", "30", "1e20", "1e309", "-1e20", "86400"):
         monkeypatch.setenv("BURNRATE_POLL_INTERVAL", value)
         timedelta(seconds=Config.from_env().poll_interval)
 
