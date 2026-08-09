@@ -122,6 +122,22 @@ async def test_an_http_error_body_is_redacted():
     assert REDACTED in excinfo.value.body
 
 
+async def test_a_token_straddling_the_error_limit_is_still_redacted():
+    """Regression for scrub-before-truncate. A token in a format the pattern does not
+    recognise is caught only by the exact-secret scrub; slicing the excerpt to
+    ERROR_BODY_LIMIT before scrubbing cut such a token in half, leaving a head
+    fragment that no longer matched the whole secret in the message /api/now serves."""
+    token = "future-fmt-token-" + "0123456789" * 6  # deliberately not sk-ant-shaped
+    body = "x" * (ERROR_BODY_LIMIT - 12) + token  # token straddles the 200-char cut
+    async with _client(lambda r: httpx.Response(500, text=body)) as client:
+        with pytest.raises(UsageHTTPError) as excinfo:
+            await fetch_usage(token, client=client)
+
+    message = str(excinfo.value)
+    assert token[:12] not in message
+    assert REDACTED in message
+
+
 async def test_an_error_with_no_response_carries_no_body():
     """Nothing to archive when the request never completed."""
 
@@ -166,6 +182,21 @@ async def test_the_archived_body_is_redacted():
     assert TOKEN not in body
     assert "sk-ant" not in body
     assert REDACTED in body
+
+
+async def test_a_token_straddling_the_archive_limit_is_still_redacted():
+    """Same regression at ARCHIVE_BODY_LIMIT: the archived body is written to the
+    database, so a token in a pattern-invisible format sliced across the 4000-char
+    boundary must not leave a fragment behind there either."""
+    token = "future-fmt-token-" + "0123456789" * 6  # deliberately not sk-ant-shaped
+    body = "x" * (ARCHIVE_BODY_LIMIT - 12) + token  # token straddles the 4000-char cut
+    async with _client(lambda r: httpx.Response(200, text=body)) as client:
+        with pytest.raises(UsageProtocolError) as excinfo:
+            await fetch_usage(token, client=client)
+
+    archived = excinfo.value.body
+    assert token[:12] not in archived
+    assert REDACTED in archived
 
 
 async def test_the_archived_body_is_longer_than_the_error_excerpt():
