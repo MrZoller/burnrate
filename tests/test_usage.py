@@ -50,6 +50,43 @@ def test_non_bucket_sections_never_become_gauges(live_response):
     assert "spend" not in keys
 
 
+def test_promo_and_overage_sections_are_ignored_by_the_parser(live_response):
+    """Issue #16, part A. We looked for a promo / adjusted-cap field to surface and
+    feed the projection; the archived responses carry none (`omelette_promotional`
+    is always null, `extra_usage` / `spend` are the paid overage pool, not a cap
+    boost). So the parser must keep ignoring these sections -- nothing here becomes a
+    bucket, and no weekly cap moves off 100%."""
+    snapshot = parse_usage(live_response)
+    keys = {b.key for b in snapshot.buckets}
+
+    for section in ("extra_usage", "spend", "omelette_promotional", "member_dashboard_available"):
+        assert section not in keys
+    # No weekly bucket ever reports a utilization above 100, so there is no adjusted
+    # cap for the projection to pick up -- the dormant-until-it-appears branch holds.
+    weekly = [b for b in snapshot.buckets if b.key.startswith("seven_day")]
+    assert all(b.utilization <= 100.0 for b in weekly)
+
+
+def test_a_hypothetical_promo_field_would_survive_archiving(live_response):
+    """The other half of part A: scrubbing must not be what hides a future promo
+    field. `scrub_json` removes the credential and nothing else, so if the endpoint
+    ever adds a promo value it reaches the raw archive intact -- ready to be surfaced
+    without a schema migration."""
+    from burnrate.redact import REDACTED, scrub_json
+
+    token = "sk-ant-oat01-secret-value"
+    payload = {
+        "weekly_limit_promo": {"multiplier": 1.5, "through": "2026-08-19"},
+        "note": f"issued with {token}",
+    }
+
+    scrubbed = scrub_json(payload, token)
+
+    assert scrubbed["weekly_limit_promo"] == {"multiplier": 1.5, "through": "2026-08-19"}
+    assert token not in str(scrubbed)
+    assert REDACTED in scrubbed["note"]
+
+
 def test_unknown_bucket_is_surfaced_as_a_notice_not_hidden(live_response):
     snapshot = parse_usage(live_response)
     bucket = snapshot.bucket("nimbus_quill")

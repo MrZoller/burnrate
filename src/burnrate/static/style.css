@@ -456,6 +456,112 @@ body {
   padding: 18px 0 10px;
 }
 
+/* ---------- attribution ("what's burning tokens") ---------- */
+
+.attribution__scope {
+  margin: 0 0 16px;
+  color: var(--ink-muted);
+  font-size: 12px;
+  max-width: 76ch;
+}
+
+.attribution__scope strong {
+  color: var(--ink-secondary);
+  font-weight: 600;
+}
+
+.attribution__panels {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--gap);
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+}
+
+.panel__title {
+  margin: 0 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--ink-muted);
+}
+
+.panel__note {
+  margin: 0 0 12px;
+  font-size: 11px;
+  color: var(--ink-muted);
+}
+
+.panel__empty {
+  color: var(--ink-muted);
+  font-style: italic;
+  font-size: 13px;
+}
+
+/* One labelled, share-proportional bar per row. Colour is a single neutral series
+   token -- these categories carry no threshold state, so no status colour applies. */
+.bar-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 10px;
+  align-items: baseline;
+  margin-bottom: 10px;
+}
+
+.bar-row:last-child {
+  margin-bottom: 0;
+}
+
+.bar-row__label {
+  color: var(--ink-secondary);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bar-row__value {
+  color: var(--ink);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.bar-row__track {
+  grid-column: 1 / -1;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--grid);
+  overflow: hidden;
+}
+
+.bar-row__fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--series);
+}
+
+/* A single headline figure (large-context / long-session share). */
+.panel__stat {
+  font-size: 34px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.panel__stat-detail {
+  margin: 4px 0 0;
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+
 /* ---------- tooltip ---------- */
 
 .tooltip {

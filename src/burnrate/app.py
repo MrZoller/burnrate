@@ -26,7 +26,12 @@ from fastapi.staticfiles import StaticFiles
 from .config import Config
 from .poller import Poller
 from .projection import Pace, Projection, pace_for, project
-from .store import MAX_POINTS_PER_BUCKET, Sample, Store
+from .store import (
+    LARGE_CONTEXT_TOKENS,
+    MAX_POINTS_PER_BUCKET,
+    Sample,
+    Store,
+)
 from .usage import KNOWN_LABELS, Bucket, UsageSnapshot, group_for, humanize
 
 logger = logging.getLogger("burnrate")
@@ -42,7 +47,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 def create_app(config: Config | None = None) -> FastAPI:
     config = config or Config.from_env()
     store = Store(config.db_path)
-    poller = Poller(store, interval=config.poll_interval)
+    poller = Poller(store, interval=config.poll_interval, projects_dir=config.attribution_dir)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -108,6 +113,19 @@ def create_app(config: Config | None = None) -> FastAPI:
                 "series": _to_series(samples),
             }
         )
+
+    @app.get("/api/attribution")
+    def attribution(
+        window: str = Query(default="7d"),
+    ) -> JSONResponse:
+        """Local token attribution for the selected window (24h or 7d).
+
+        A proxy for what is consuming tokens on THIS machine, computed from Claude
+        Code's own session transcripts -- not a reconstruction of the usage meter,
+        and not aggregated across devices. Read-only; carries token counts, never a
+        credential.
+        """
+        return JSONResponse(_attribution_payload(store, window))
 
     @app.get("/api/healthz")
     def healthz() -> JSONResponse:
@@ -190,6 +208,107 @@ def _projection_json(projection: Projection) -> dict[str, Any]:
         "hits_cap_at": _iso(projection.hits_cap_at),
         "hours_to_cap": projection.hours_to_cap,
     }
+
+
+# How many windows the attribution section offers, and the hours each covers. The
+# section is deliberately matched to the meter's own windows (issue #16).
+_ATTRIBUTION_WINDOWS: dict[str, float] = {"24h": 24.0, "7d": 168.0}
+_DEFAULT_WINDOW = "7d"
+
+# Longest list any single panel returns, so a machine with dozens of projects or a
+# marathon of sessions does not ship an unbounded response.
+_TOP_N = 8
+
+ATTRIBUTION_SCOPE = "This machine only — local token counts, not the usage meter."
+
+
+def _attribution_payload(store: Store, window: str) -> dict[str, Any]:
+    """Assemble the attribution response for one window.
+
+    Kept out of the handler so it is a plain, directly testable function. The
+    scope label is always present, whatever the data -- an empty tree still renders
+    an honest, correctly-scoped (and empty) section rather than nothing.
+    """
+    if window not in _ATTRIBUTION_WINDOWS:
+        window = _DEFAULT_WINDOW
+    hours = _ATTRIBUTION_WINDOWS[window]
+
+    totals = store.attribution_totals(hours)
+    sessions = store.attribution_sessions(hours)
+
+    hourly_total = sum(tokens for _, tokens in totals["by_project"])
+    by_agent = totals["by_agent"]
+
+    # Genuinely windowed: both numerator and denominator are sums over hours inside the
+    # window, so the 24h/7d toggle actually bounds this. large_context_tokens is the
+    # subset of in-window tokens from turns that were themselves at large context.
+    large_context_tokens = totals["large_context_tokens"]
+
+    return {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "window": window,
+        "hours": hours,
+        "scope": ATTRIBUTION_SCOPE,
+        "total_tokens": hourly_total,
+        "token_breakdown": totals["breakdown"],
+        "by_project": _shared_rows(
+            [(_project_name(name), tokens) for name, tokens in totals["by_project"]],
+            hourly_total,
+        ),
+        "by_model": _shared_rows(totals["by_model"], hourly_total),
+        "by_agent": _shared_rows(
+            [("Main", by_agent.get(0, 0)), ("Subagents", by_agent.get(1, 0))],
+            hourly_total,
+        ),
+        "large_context": {
+            "threshold_tokens": LARGE_CONTEXT_TOKENS,
+            "tokens": large_context_tokens,
+            "share": _share(large_context_tokens, hourly_total),
+        },
+        # Sessions inherently cross windows, so there is no honest "share of the window"
+        # here -- these are the longest sessions ACTIVE in the window, each carrying its
+        # own span and its LIFETIME token total, labelled as lifetime in the UI. No
+        # windowed percentage is reported for them.
+        "top_sessions": [
+            {
+                "project": _project_name(s["project"]),
+                "model": s["model"],
+                "duration_hours": round(_session_hours(s), 2),
+                "lifetime_tokens": s["total_tokens"],
+                "max_context_tokens": s["max_turn_context"],
+            }
+            for s in sorted(sessions, key=_session_hours, reverse=True)[:_TOP_N]
+        ],
+    }
+
+
+def _shared_rows(rows: list[tuple[str, int]], total: int) -> list[dict[str, Any]]:
+    """Label/token pairs with each row's share of ``total``, longest first, top N."""
+    ordered = sorted(rows, key=lambda row: row[1], reverse=True)
+    return [
+        {"label": label, "tokens": tokens, "share": _share(tokens, total)}
+        for label, tokens in ordered[:_TOP_N]
+        if tokens > 0
+    ]
+
+
+def _share(part: int, whole: int) -> float:
+    return part / whole if whole else 0.0
+
+
+def _session_hours(session: dict[str, Any]) -> float:
+    start = session.get("start_ts")
+    end = session.get("end_ts")
+    if start is None or end is None:
+        return 0.0
+    return max(0.0, (end - start).total_seconds() / 3600.0)
+
+
+def _project_name(path: str) -> str:
+    """The readable basename of a working directory, never the full path."""
+    if not path or path == "unknown":
+        return "unknown"
+    return Path(path).name or path
 
 
 def _to_series(samples: list[Sample]) -> list[dict[str, Any]]:

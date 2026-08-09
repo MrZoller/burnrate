@@ -28,6 +28,8 @@
       <string>__PORT__</string>
       <key>BURNRATE_POLL_INTERVAL</key>
       <string>__INTERVAL__</string>
+      <key>BURNRATE_PROJECTS_DIR</key>
+      <string>__PROJECTS__</string>
       <key>PYTHONUNBUFFERED</key>
       <string>1</string>
     </dict>

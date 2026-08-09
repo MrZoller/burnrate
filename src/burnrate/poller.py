@@ -17,6 +17,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -44,6 +45,12 @@ RETRY_AFTER_MAX_SECONDS = 3600.0
 # sample window overshot the same way. Six hours is far finer than either window at
 # any interval, and the work is two indexed DELETEs.
 PRUNE_EVERY = timedelta(hours=6)
+
+# How often the local token-attribution rollup is refreshed (issue #16). Independent
+# of the poll cadence and of the remote endpoint: the JSONLs are local, so a failing
+# usage fetch must not stop attribution from updating. Each pass reads only the bytes
+# appended since last time, so ten minutes is cheap after the first run.
+AGGREGATE_EVERY = timedelta(minutes=10)
 
 # Doublings past which the backoff ceiling has certainly been reached, so the
 # exponent saturates instead of growing until it overflows a float.
@@ -91,6 +98,7 @@ class Poller:
         store: Store,
         interval: float = POLL_INTERVAL_SECONDS,
         client: httpx.AsyncClient | None = None,
+        projects_dir: Path | str | None = None,
     ) -> None:
         self.store = store
         self.interval = interval
@@ -101,6 +109,9 @@ class Poller:
         self._task: asyncio.Task[None] | None = None
         self._stopping = asyncio.Event()
         self._last_prune_at: datetime | None = None
+        # None disables local attribution entirely (no projects dir configured).
+        self._projects_dir = Path(projects_dir) if projects_dir is not None else None
+        self._last_aggregate_at: datetime | None = None
         # Parsed Retry-After (seconds) from the most recent 429, consumed by the very
         # next `next_delay` and then cleared -- see `_record_failure` and `next_delay`.
         # None means "no server-set floor", the state after any success or non-429
@@ -210,6 +221,9 @@ class Poller:
         # trigger never fires, so the advertised retention applied precisely never
         # during the outage that was filling it.
         self._maybe_prune(now)
+        # Also before the fetch and regardless of its outcome: attribution reads local
+        # JSONLs, so it must keep updating even while the remote endpoint is failing.
+        await self._maybe_aggregate(now)
 
         try:
             payload = await self._fetch_with_one_auth_retry()
@@ -291,6 +305,33 @@ class Poller:
             self.store.prune()
         except Exception:  # noqa: BLE001 - pruning is housekeeping, not critical
             logger.exception("prune failed")
+
+    async def _maybe_aggregate(self, now: datetime) -> None:
+        """Refresh the local attribution rollup, at most once per AGGREGATE_EVERY.
+
+        Runs the parse and the SQLite writes on a worker thread so a large first pass
+        over the transcript tree never blocks the event loop, and swallows everything:
+        a malformed tree, a permissions error, a schema surprise -- none of it may
+        stop the poll loop. Stamped before the work so a slow or failing pass retries
+        on the schedule rather than on every single poll.
+        """
+        if self._projects_dir is None:
+            return
+        if self._last_aggregate_at is not None and now - self._last_aggregate_at < AGGREGATE_EVERY:
+            return
+        self._last_aggregate_at = now
+        try:
+            stats = await asyncio.to_thread(self.store.aggregate_jsonl, self._projects_dir)
+            if stats.files_with_new_data:
+                logger.info(
+                    "attribution: %d/%d files updated, %d turns, %d malformed lines",
+                    stats.files_with_new_data,
+                    stats.files_scanned,
+                    stats.emitted,
+                    stats.malformed,
+                )
+        except Exception:  # noqa: BLE001 - attribution must never kill polling
+            logger.exception("attribution aggregation failed")
 
     def _archive_unreadable(self, body: Any, ts: datetime) -> None:
         """Keep the body that broke the parser, without letting that failure win.

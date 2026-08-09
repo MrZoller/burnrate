@@ -1,0 +1,2 @@
+{"type":"assistant","cwd":"/home/dev/proj-y","sessionId":"u1","isSidechain":false,"timestamp":"2026-08-09T12:00:00.000Z","attributionSkill":"loop","effort":"high","futureField":{"nested":[1,2,3]},"message":{"model":"claude-opus-5","usage":{"input_tokens":80,"output_tokens":30,"service_tier":"standard","cache_creation":{"ephemeral_5m_input_tokens":5},"iterations":2,"some_future_token_field":999}}}
+{"type":"a-brand-new-record-type","sessionId":"u1","payload":{"anything":true}}

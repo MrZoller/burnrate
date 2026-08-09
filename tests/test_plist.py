@@ -137,6 +137,8 @@ def test_the_real_template_renders_and_parses(tmp_path):
             "8377",
             "INTERVAL",
             "15",
+            "PROJECTS",
+            "/home/dev/.claude/projects",
             "LOG",
             "/logs/burnrate.log",
         ]
@@ -149,6 +151,7 @@ def test_the_real_template_renders_and_parses(tmp_path):
     assert env["BURNRATE_POLL_INTERVAL"] == "15"
     assert env["BURNRATE_HOST"] == "0.0.0.0"
     assert env["BURNRATE_PORT"] == "8377"
+    assert env["BURNRATE_PROJECTS_DIR"] == "/home/dev/.claude/projects"
     assert parsed["Label"] == "com.mrzoller.burnrate"
 
 

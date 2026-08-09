@@ -63,6 +63,24 @@
         <div class="charts" id="charts"></div>
       </section>
 
+      <section class="attribution" aria-labelledby="attr-label">
+        <div class="section-head">
+          <h2 class="section-title" id="attr-label">What&rsquo;s burning tokens</h2>
+          <div class="range" id="attr-range" role="group" aria-label="Attribution time range">
+            <button type="button" data-window="24h">24h</button>
+            <button type="button" data-window="7d" aria-pressed="true">7d</button>
+          </div>
+        </div>
+        <!-- Always in the DOM, whatever the data: the scope claim must never be
+             absent while the numbers are present. -->
+        <p class="attribution__scope" id="attr-scope">
+          This machine only &mdash; local token counts parsed from Claude Code&rsquo;s
+          session logs. A proxy for what is consuming tokens, <strong>not</strong> the
+          usage meter above and not other devices or claude.ai.
+        </p>
+        <div class="attribution__panels" id="attr-panels"></div>
+      </section>
+
       <details class="table-view">
         <summary>Table view</summary>
         <div class="table-scroll">

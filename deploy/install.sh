@@ -107,8 +107,9 @@ fi
   IFS= read -r -d '' HOST
   IFS= read -r -d '' PORT
   IFS= read -r -d '' INTERVAL
+  IFS= read -r -d '' PROJECTS
 } < <("$PYTHON" -m burnrate.config --null)
-[ -n "$DB" ] && [ -n "$HOST" ] && [ -n "$PORT" ] && [ -n "$INTERVAL" ] \
+[ -n "$DB" ] && [ -n "$HOST" ] && [ -n "$PORT" ] && [ -n "$INTERVAL" ] && [ -n "$PROJECTS" ] \
   || die "could not read the effective configuration from burnrate.config"
 
 mkdir -p "$HOME/Library/LaunchAgents" "$(dirname "$LOG")" "$(dirname "$DB")"
@@ -134,6 +135,7 @@ fi
   HOST "$HOST" \
   PORT "$PORT" \
   INTERVAL "$INTERVAL" \
+  PROJECTS "$PROJECTS" \
   LOG "$LOG" || die "could not render the plist"
 
 plutil -lint "$PLIST_DST" >/dev/null || die "generated plist is invalid: $PLIST_DST"

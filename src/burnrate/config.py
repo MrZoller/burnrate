@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import TextIO
 
 DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "burnrate" / "burnrate.db"
+# Where Claude Code writes its session transcripts. The local-attribution subsystem
+# (issue #16) reads these, read-only; an override exists mainly so tests can point it
+# at a fixture tree.
+DEFAULT_ATTRIBUTION_DIR = Path.home() / ".claude" / "projects"
 DEFAULT_HOST = "0.0.0.0"  # noqa: S104 - LAN/Tailscale exposure is the point
 DEFAULT_PORT = 8377
 
@@ -36,6 +40,7 @@ class Config:
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
     poll_interval: float = 60.0
+    attribution_dir: Path = DEFAULT_ATTRIBUTION_DIR
 
     @property
     def stale_after_seconds(self) -> float:
@@ -59,6 +64,9 @@ class Config:
             poll_interval=_positive_float_env(
                 "BURNRATE_POLL_INTERVAL", 60.0, MAX_POLL_INTERVAL_SECONDS
             ),
+            attribution_dir=Path(
+                _str_env("BURNRATE_PROJECTS_DIR", str(DEFAULT_ATTRIBUTION_DIR))
+            ).expanduser(),
         )
 
 
@@ -110,8 +118,9 @@ def print_effective(stream: TextIO | None = None, separator: str = "\n") -> None
     environment, so a BURNRATE_PORT of "abc" went into the plist and into the probe
     URL while `from_env` quietly rejected it and the agent listened on 8377.
 
-    Order is the contract -- db, host, port, interval -- and is pinned by a test,
-    because a silent reordering here would misconfigure the agent rather than fail.
+    Order is the contract -- db, host, port, interval, projects-dir -- and is pinned
+    by a test, because a silent reordering here would misconfigure the agent rather
+    than fail. New fields are appended at the end so the existing positions never move.
 
     `separator` exists because a path may legally contain a newline: only `/` and
     NUL are forbidden in a POSIX filename. Newline-delimited records turned such a
@@ -121,7 +130,13 @@ def print_effective(stream: TextIO | None = None, separator: str = "\n") -> None
     """
     config = Config.from_env()
     out = stream if stream is not None else sys.stdout
-    for value in (config.db_path, config.host, config.port, config.poll_interval):
+    for value in (
+        config.db_path,
+        config.host,
+        config.port,
+        config.poll_interval,
+        config.attribution_dir,
+    ):
         out.write(f"{value}{separator}")
 
 

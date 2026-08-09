@@ -385,6 +385,82 @@ async def test_a_failing_prune_retries_on_schedule_not_on_every_poll(store, monk
     assert calls["n"] == 1
 
 
+def _counting_aggregate(store, monkeypatch):
+    """Count attribution passes without touching the filesystem."""
+    from burnrate.store import AggregateStats
+
+    seen = {"n": 0}
+
+    def counted(root, *args, **kwargs):
+        seen["n"] += 1
+        return AggregateStats()
+
+    monkeypatch.setattr(store, "aggregate_jsonl", counted)
+    return seen
+
+
+async def test_attribution_runs_on_the_first_poll_and_is_gated_by_time(
+    store, monkeypatch, live_response, tmp_path
+):
+    _credentials(monkeypatch, "tok")
+    _fetches(monkeypatch, lambda token, n: live_response)
+    poller = Poller(store, projects_dir=tmp_path)
+    aggregated = _counting_aggregate(store, monkeypatch)
+
+    await poller.poll_once()
+    assert aggregated["n"] == 1, "the first attempt aggregates"
+
+    await poller.poll_once()
+    await poller.poll_once()
+    assert aggregated["n"] == 1, "and not again until the window elapses"
+
+    poller._last_aggregate_at -= poller_module.AGGREGATE_EVERY
+    await poller.poll_once()
+    assert aggregated["n"] == 2, "once AGGREGATE_EVERY has passed it runs again"
+
+
+async def test_attribution_runs_even_when_the_usage_fetch_fails(store, monkeypatch, tmp_path):
+    """The transcripts are local, so a broken usage endpoint must not stop attribution."""
+    _credentials(monkeypatch, "tok")
+    _fetches(monkeypatch, lambda token, n: {"nothing": "usable"})
+    poller = Poller(store, projects_dir=tmp_path)
+    aggregated = _counting_aggregate(store, monkeypatch)
+
+    await poller.poll_once()
+
+    assert poller.status.consecutive_failures == 1
+    assert aggregated["n"] == 1
+
+
+async def test_a_failing_aggregation_never_kills_the_poll_loop(
+    store, monkeypatch, live_response, tmp_path
+):
+    _credentials(monkeypatch, "tok")
+    _fetches(monkeypatch, lambda token, n: live_response)
+    poller = Poller(store, projects_dir=tmp_path)
+
+    def boom(*a, **k):
+        raise RuntimeError("corrupt transcript tree")
+
+    monkeypatch.setattr(store, "aggregate_jsonl", boom)
+
+    snapshot = await poller.poll_once()
+
+    assert snapshot is not None, "the usage poll still succeeds despite the aggregation error"
+    assert poller.status.healthy
+
+
+async def test_attribution_is_disabled_without_a_projects_dir(store, monkeypatch, live_response):
+    _credentials(monkeypatch, "tok")
+    _fetches(monkeypatch, lambda token, n: live_response)
+    poller = Poller(store)  # no projects_dir
+    aggregated = _counting_aggregate(store, monkeypatch)
+
+    await poller.poll_once()
+
+    assert aggregated["n"] == 0
+
+
 async def test_a_failed_archive_does_not_replace_the_schema_diagnosis(store, monkeypatch):
     """Losing the archive copy is a footnote; the reported error must still be
     the schema break, not a database complaint about storing it."""
