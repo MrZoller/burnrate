@@ -191,9 +191,15 @@ def _parse_expiry(raw: object) -> datetime | None:
     if isinstance(raw, bool) or raw is None:
         return None
     if isinstance(raw, int | float):
-        # Values this large are milliseconds; Claude Code writes millis today.
-        seconds = raw / 1000 if raw > 1e11 else float(raw)
+        # The normalisation is inside the guard, not before it. A JSON integer has no
+        # width limit, so `raw / 1000` on 10**400 raises OverflowError -- and it raised
+        # from a field that is only advisory, which meant an unusable expiry blocked a
+        # perfectly good access token and every poll failed without ever reaching the
+        # API. The whole point of this function returning None is that the expiry never
+        # gets to do that.
         try:
+            # Values this large are milliseconds; Claude Code writes millis today.
+            seconds = raw / 1000 if raw > 1e11 else float(raw)
             return datetime.fromtimestamp(seconds, tz=UTC)
         except (OverflowError, OSError, ValueError):
             return None

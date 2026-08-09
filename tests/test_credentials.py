@@ -8,6 +8,7 @@ import pytest
 
 from burnrate import credentials
 from burnrate.credentials import (
+    OAUTH_KEY,
     CredentialError,
     parse_credentials_json,
     read_credential,
@@ -300,3 +301,18 @@ def _uname(sysname):
     u = _U()
     u.sysname = sysname
     return u
+
+
+@pytest.mark.parametrize("raw", [10**400, -(10**400), 10**309])
+def test_an_oversized_expiry_does_not_block_the_token(tmp_path, raw):
+    """Regression: the millis-vs-seconds normalisation sat outside the guard, so
+    `raw / 1000` on a huge integer raised OverflowError -- and it raised from a field
+    that is only advisory, so an unusable expiry blocked a perfectly good access token
+    and every poll failed without ever reaching the API."""
+    path = tmp_path / ".credentials.json"
+    path.write_text(json.dumps({OAUTH_KEY: {"accessToken": "sk-ant-oat01-fine", "expiresAt": raw}}))
+
+    credential = read_from_file(path)
+
+    assert credential.access_token == "sk-ant-oat01-fine"
+    assert credential.expires_at is None, "unreadable means absent, not fatal"

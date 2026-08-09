@@ -168,3 +168,44 @@ def test_the_module_is_runnable_the_way_install_sh_runs_it(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert _db_from(dst.read_text()) == "/a&b.db"
+
+
+def test_a_carriage_return_survives_a_conforming_xml_parser():
+    """Regression: XML 1.0 requires a conforming parser to normalise a literal CR to
+    LF, so a path containing one produced a plist whose value depended on the reader --
+    `plutil -extract` returned the CR, expat returned LF. Two parsers, two different
+    databases, from one file. plistlib uses expat, so this is the strict side."""
+    path = "/tmp/burnrate\rcarriage.db"
+
+    rendered = render(TEMPLATE, {"LABEL": "x", "DB": path})
+
+    assert "&#13;" in rendered, "the CR must be a character reference, not a raw byte"
+    assert _db_from(rendered) == path
+
+
+@pytest.mark.parametrize("path", ["/a\rb.db", "/a\r\nb.db", "/a\nb.db", "/a\r\rb.db"])
+def test_line_break_shapes_all_round_trip(path):
+    assert _db_from(render(TEMPLATE, {"LABEL": "x", "DB": path})) == path
+
+
+@pytest.mark.parametrize("bad", ["\x00", "\x01", "\x07", "\x0b", "\x0c", "\x1f"])
+def test_a_character_xml_cannot_carry_is_refused(bad):
+    """These cannot be expressed in XML 1.0 at all, not even as a character reference.
+    Better to name the character than to emit a file that fails `plutil -lint` with
+    nothing pointing at the cause."""
+    with pytest.raises(ValueError, match="XML cannot represent"):
+        render(TEMPLATE, {"LABEL": "x", "DB": f"/tmp/bad{bad}.db"})
+
+
+def test_nothing_is_written_when_a_value_cannot_be_represented(tmp_path, capsys):
+    """install.sh bootstraps whatever is on disk, so a half-rendered plist would be
+    worse than none."""
+    src = tmp_path / "t.plist"
+    src.write_text(TEMPLATE)
+    dst = tmp_path / "out.plist"
+
+    rc = main([str(src), str(dst), "LABEL", "x", "DB", "/tmp/bell\x07.db"])
+
+    assert rc == 1
+    assert "XML cannot represent" in capsys.readouterr().err
+    assert not dst.exists()

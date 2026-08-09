@@ -45,9 +45,34 @@ def render(template: str, values: dict[str, str]) -> str:
         name = match.group(1)
         if name not in values:
             return match.group(0)
-        return escape(values[name])
+        return _xml_text(values[name])
 
     return PLACEHOLDER.sub(substitute, template)
+
+
+# Control characters XML 1.0 cannot carry at all -- not literally and not as a
+# character reference. A path containing one simply cannot be expressed in an XML
+# plist, so say which character it was rather than emitting a file that fails `plutil
+# -lint` with nothing pointing at the cause.
+UNREPRESENTABLE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _xml_text(value: str) -> str:
+    """A value as XML text, surviving the reader's line-break normalisation.
+
+    `escape` is not sufficient. XML 1.0 requires a conforming parser to normalise a
+    literal carriage return to a line feed, so a path containing one produced a plist
+    whose value depended on who read it: `plutil -extract` returns the CR, expat
+    returns LF. Two parsers, two different databases, from one file -- and a carriage
+    return is legal in a POSIX filename. A numeric character reference is exempt from
+    that normalisation and decodes back to the exact byte in both.
+    """
+    found = UNREPRESENTABLE.search(value)
+    if found:
+        raise ValueError(
+            f"value contains {found.group()!r}, which XML cannot represent in any form"
+        )
+    return escape(value).replace("\r", "&#13;")
 
 
 def main(argv: list[str]) -> int:
@@ -76,7 +101,15 @@ def main(argv: list[str]) -> int:
         print(f"error: the template needs values not given: {names}", file=sys.stderr)
         return 1
 
-    dst.write_text(render(template, values))
+    try:
+        rendered = render(template, values)
+    except ValueError as exc:
+        # Nothing is written. A half-rendered plist would be worse than no plist:
+        # install.sh bootstraps whatever is on disk.
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    dst.write_text(rendered)
     return 0
 
 
