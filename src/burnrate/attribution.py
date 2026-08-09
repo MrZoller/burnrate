@@ -122,7 +122,13 @@ def parse_lines(lines: Iterable[str], stats: ParseStats | None = None) -> Iterat
         tally.lines += 1
         try:
             record = json.loads(text)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, RecursionError):
+            # RecursionError (a RuntimeError, not a ValueError) is what deeply-nested
+            # JSON raises. Left uncaught it escapes parse_lines -- which promises never to
+            # raise -- and the unguarded fold loop in aggregate_jsonl, before the
+            # watermark flush, so the offset never advances and every later pass re-reads
+            # the same poison line and re-raises: a permanent total freeze of attribution,
+            # the same class as the OverflowError and far-future-timestamp freezes.
             tally.malformed += 1
             continue
         if not isinstance(record, dict):

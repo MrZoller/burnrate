@@ -241,6 +241,35 @@ def test_the_plausibility_ceiling_rejects_above_but_keeps_a_real_large_turn():
     assert real.input_tokens == 2_000_000  # a big real turn is unchanged, never clamped
 
 
+def test_deeply_nested_json_is_malformed_not_a_freeze(tmp_path):
+    """Codex round 5 #1: deeply-nested JSON raises RecursionError (a RuntimeError, not a
+    ValueError), which must be caught as malformed. Left uncaught it escaped parse_lines
+    and the fold loop before the watermark flush, freezing all attribution forever."""
+    depth = 100_000
+    nested = "[" * depth + "]" * depth
+    # Guard the premise: this really is a RecursionError -- the case the old tuple missed.
+    with pytest.raises(RecursionError):
+        json.loads(nested)
+
+    stats = ParseStats()
+    assert list(parse_lines([nested], stats)) == []
+    assert stats.malformed == 1
+
+    now = datetime.now(UTC)
+    healthy = _assistant(ts=now, cwd="/work/a", input_tokens=3, output_tokens=0)
+    root = _tree(tmp_path / "projects", {"a.jsonl": [nested, healthy]})
+    store = Store(tmp_path / "b.db")
+
+    first = store.aggregate_jsonl(root)  # must not raise RecursionError
+    second = store.aggregate_jsonl(root)
+
+    assert first.emitted == 1  # only the healthy record; the poison line is malformed
+    assert first.malformed == 1
+    assert second.emitted == 0  # committed and watermark advanced, not re-read forever
+    totals = store.attribution_totals(168, now=now)
+    assert dict(totals["by_project"])["/work/a"] == 3
+
+
 def test_a_far_future_timestamp_is_dropped_without_freezing(tmp_path):
     """Codex #1: a timestamp that overflows datetime.max when shifted to UTC must be
     dropped at parse, not raise inside aggregate_jsonl (which would freeze the watermark
@@ -445,7 +474,10 @@ def test_aggregate_rolls_up_by_project_model_and_sidechain(tmp_path):
     stats = store.aggregate_jsonl(root)
 
     assert stats.emitted == 3
-    totals = store.attribution_totals(168)
+    # Pin the query time past both turns: the sidechain turn is dated now+1min, whose
+    # hour bucket rolls to the next hour when the test starts in the last minute of an
+    # hour, and the hour_start <= now upper bound would then drop it (~1.6% of runs).
+    totals = store.attribution_totals(168, now=now + timedelta(minutes=1))
     assert dict(totals["by_project"]) == {"/work/alpha": 165, "/work/beta": 150}
     assert dict(totals["by_model"]) == {"claude-opus-4-8": 300, "claude-sonnet-5": 15}
     assert totals["by_agent"] == {0: 300, 1: 15}  # main vs sidechain
