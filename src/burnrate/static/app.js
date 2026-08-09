@@ -118,6 +118,21 @@ function formatClock(iso) {
   });
 }
 
+/** Date-aware variant for spans whose two ends can be days apart. `formatClock`
+ * carries no date, so a 7-day window ("Sat 9:00 PM → Sat 9:00 PM") stringified to
+ * identical endpoints and read as zero-length -- the two ends must be distinguishable. */
+function formatDateClock(iso) {
+  if (!iso) return "—";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 function el(tag, attrs = {}, children = []) {
   const node =
     tag === "svg" || SVG_TAGS.has(tag)
@@ -225,7 +240,9 @@ function renderGauge(bucket, stale) {
   if (bucket.window_opened_at && bucket.resets_at) {
     windowLine = el("div", {
       class: "gauge__window",
-      text: `${formatClock(bucket.window_opened_at)} → ${formatClock(bucket.resets_at)}`,
+      // Date-aware: a weekly window's two ends fall on the same weekday+time, so a
+      // weekday-only format would render them identically and hide the actual span.
+      text: `${formatDateClock(bucket.window_opened_at)} → ${formatDateClock(bucket.resets_at)}`,
     });
   } else if (!bucket.resets_at) {
     windowLine = el("div", { class: "gauge__window", text: "No reset reported" });
