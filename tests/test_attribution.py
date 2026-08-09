@@ -152,6 +152,95 @@ def test_token_counts_are_coerced_defensively():
     assert turn.total_tokens == 100
 
 
+def test_a_token_count_above_sqlite_range_reads_as_zero():
+    """Codex #1: a bare huge integer is valid JSON but cannot be stored, and letting it
+    through overflows the batch commit. It must read as 0, like any other bad value."""
+    over_max = 9_223_372_036_854_775_807 + 1
+    usage = {"input_tokens": over_max, "output_tokens": 50}
+    turn = turn_from_record(_assistant_record(usage))
+
+    assert turn is not None
+    assert turn.input_tokens == 0  # the poison value is dropped
+    assert turn.total_tokens == 50  # the legitimate field still counts
+
+
+def test_an_out_of_range_token_count_does_not_freeze_aggregation(tmp_path):
+    """The end-to-end failure Codex #1 describes: a record with an oversized token field
+    must still let aggregate_jsonl COMMIT and advance the watermark, or every later pass
+    re-reads the poison record and re-raises OverflowError forever."""
+    now = datetime.now(UTC)
+    over_max = 9_223_372_036_854_775_807 * 1000
+    poison = json.dumps(
+        {
+            "type": "assistant",
+            "cwd": "/work/a",
+            "sessionId": "s1",
+            "timestamp": now.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+            "message": {
+                "model": "claude-opus-4-8",
+                "usage": {"input_tokens": over_max, "output_tokens": 7},
+            },
+        }
+    )
+    healthy = _assistant(ts=now, cwd="/work/a", input_tokens=3, output_tokens=50)
+    root = _tree(tmp_path / "projects", {"a.jsonl": [poison, healthy]})
+    store = Store(tmp_path / "b.db")
+
+    # No OverflowError, and the watermark advances so a second pass reads nothing new.
+    first = store.aggregate_jsonl(root)
+    second = store.aggregate_jsonl(root)
+
+    assert first.emitted == 2
+    assert second.emitted == 0  # committed and watermarked, not re-read forever
+    # The poison field became 0 (so the poison record contributes only its output 7);
+    # the healthy record's real tokens are intact.
+    totals = store.attribution_totals(168, now=now)
+    assert dict(totals["by_project"])["/work/a"] == 7 + (3 + 50)
+
+
+def test_a_field_at_the_sqlite_max_still_commits(tmp_path):
+    """The BLOCK the per-field-at-2^63 bound missed: input_tokens at exactly
+    SQLITE_MAX_INT passes a 2^63 guard, but total_tokens = max + 50 overflows at flush
+    and rolls the batch (watermarks included) back. A plausibility cap rejects the field
+    outright, so the sum stays small and the batch commits."""
+    now = datetime.now(UTC)
+    sqlite_max = 9_223_372_036_854_775_807
+    poison = json.dumps(
+        {
+            "type": "assistant",
+            "cwd": "/work/a",
+            "sessionId": "s1",
+            "timestamp": now.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+            "message": {
+                "model": "claude-opus-4-8",
+                "usage": {"input_tokens": sqlite_max, "output_tokens": 50},
+            },
+        }
+    )
+    root = _tree(tmp_path / "projects", {"a.jsonl": [poison]})
+    store = Store(tmp_path / "b.db")
+
+    first = store.aggregate_jsonl(root)  # must not raise OverflowError
+    second = store.aggregate_jsonl(root)
+
+    assert first.emitted == 1
+    assert second.emitted == 0  # committed and watermark advanced, not re-read forever
+    totals = store.attribution_totals(168, now=now)
+    assert dict(totals["by_project"])["/work/a"] == 50  # poison field 0, companion intact
+
+
+def test_the_plausibility_ceiling_rejects_above_but_keeps_a_real_large_turn():
+    """Just over MAX_TOKENS_PER_FIELD is garbage; a genuinely large real turn is kept."""
+    over = turn_from_record(_assistant_record({"input_tokens": 1_000_000_001, "output_tokens": 5}))
+    assert over is not None
+    assert over.input_tokens == 0  # 1e9 + 1 -> rejected as implausible
+    assert over.output_tokens == 5  # the companion field is untouched
+
+    real = turn_from_record(_assistant_record({"input_tokens": 2_000_000, "output_tokens": 0}))
+    assert real is not None
+    assert real.input_tokens == 2_000_000  # a big real turn is unchanged, never clamped
+
+
 def test_missing_cwd_and_session_fall_back_to_unknown():
     turn = turn_from_record(
         {

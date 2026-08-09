@@ -1002,16 +1002,30 @@ async function loadAttribution(window) {
   return response.json();
 }
 
+/* Same newest-issued starvation the /api/now path guards against: refreshAttribution
+ * is fired every tick from refresh() at a cadence as low as 5s, so a request slower
+ * than the tick has attributionRequest bumped past it before it resolves. A plain
+ * `token !== attributionRequest` check would then bail on BOTH branches and the panel
+ * would freeze empty/stale. attributionRequest is the newest ISSUED; appliedAttribution
+ * is the newest whose OUTCOME was rendered. Gating on appliedAttribution (drop only a
+ * genuinely older result) and advancing it on both success and failure lets the newest
+ * completed outcome win. Mirrors appliedNow above. */
 let attributionRequest = 0;
+let appliedAttribution = 0;
 
 async function refreshAttribution() {
   const token = ++attributionRequest;
   try {
     const data = await loadAttribution(state.attrWindow);
-    if (token !== attributionRequest) return;
+    if (token <= appliedAttribution) return;
+    appliedAttribution = token;
     renderAttribution(data);
   } catch (error) {
-    if (token !== attributionRequest) return;
+    // Strict `<`, like the /api/now failure path: token === appliedAttribution here can
+    // only mean this same invocation already applied its success and then render threw,
+    // so fall through and surface the failure rather than swallowing it.
+    if (token < appliedAttribution) return;
+    appliedAttribution = token;
     els.attrPanels.replaceChildren(
       panel("Attribution unavailable", [
         el("div", { class: "panel__empty", text: `Could not load local attribution: ${error.message}` }),

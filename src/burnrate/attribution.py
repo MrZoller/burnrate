@@ -37,6 +37,22 @@ SYNTHETIC_MODEL = "<synthetic>"
 # counted somewhere rather than silently lost.
 UNKNOWN = "unknown"
 
+# Largest value any single token field may plausibly hold. A single assistant turn's
+# token count cannot approach a billion -- context windows are ~1e6 -- so anything above
+# this is corruption, or a misplaced value in the wrong field (a nanosecond epoch
+# timestamp, ~1.7e18, is the realistic trigger), and is treated as garbage -> 0.
+#
+# The ceiling is per FIELD on purpose, and it is what keeps every downstream SUM safe.
+# Bounding only at SQLite's 2^63 limit was not enough: the values that actually reach
+# the database are sums that are never re-bounded -- total_tokens (4 fields),
+# context_tokens (3 fields), the per-hour and per-session accumulators (across records),
+# the additive UPSERT, and the query-time SUM(). Any of those can exceed 2^63 from
+# individually-"valid" fields and raise OverflowError at flush, which rolls back the
+# whole batch INCLUDING the watermarks, so the next pass re-reads the same poison record
+# and fails forever. A 1e9 per-field cap keeps every one of those sums comfortably below
+# 2^63, closing both the flush-rollback freeze and the query-time overflow.
+MAX_TOKENS_PER_FIELD = 1_000_000_000
+
 # Most bytes one read_new_lines call pulls into memory at once. A first pass over a
 # multi-hundred-MB transcript would otherwise read the whole file into a single bytes
 # object; capping the read means the aggregation drains such a file in bounded chunks
@@ -249,17 +265,24 @@ def read_new_lines(
 
 
 def _non_negative_int(value: object) -> int:
-    """Coerce a token count to a non-negative int; anything else reads as 0.
+    """Coerce a token count to a plausible non-negative int; anything else reads as 0.
 
     ``bool`` is rejected before ``int`` because ``True`` is an ``int`` in Python and a
-    stray boolean in a usage field should count as nothing, not as one token.
+    stray boolean in a usage field should count as nothing, not as one token. Anything
+    above ``MAX_TOKENS_PER_FIELD`` -- a bare huge integer, or a float that rounds to one
+    -- is implausible for a single turn and treated as garbage, which (see that
+    constant) is what keeps every downstream sum below SQLite's 2^63 limit rather than
+    only bounding each field at that limit and letting the sums overflow.
     """
     if isinstance(value, bool):
         return 0
     if isinstance(value, int):
-        return value if value >= 0 else 0
+        return value if 0 <= value <= MAX_TOKENS_PER_FIELD else 0
     if isinstance(value, float):
-        return int(value) if math.isfinite(value) and value >= 0 else 0
+        if not (math.isfinite(value) and value >= 0):
+            return 0
+        as_int = int(value)
+        return as_int if as_int <= MAX_TOKENS_PER_FIELD else 0
     return 0
 
 
