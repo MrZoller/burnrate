@@ -150,8 +150,10 @@ def turn_from_record(record: dict) -> Turn | None:
     """
     if record.get("type") != "assistant":
         return None
-    # An API error turn is not real usage; it reports a failed request.
-    if record.get("isApiErrorMessage"):
+    # An API error turn is not real usage; it reports a failed request. Require a real
+    # boolean, as isSidechain does: a truthy non-bool (e.g. the string "false") must not
+    # drop a legitimate usage turn.
+    if record.get("isApiErrorMessage") is True:
         return None
 
     message = record.get("message")

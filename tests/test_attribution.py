@@ -410,6 +410,62 @@ def test_a_non_boolean_sidechain_flag_is_not_a_subagent():
     assert sub.is_sidechain is True  # a real JSON true still reads as a subagent
 
 
+def test_an_api_error_flag_must_be_a_real_boolean():
+    """Codex round 7: isApiErrorMessage drops a turn as a failed request, but a truthy
+    non-boolean like the string "false" must NOT drop a legitimate usage turn -- the
+    same `is True` convention isSidechain follows."""
+    kept = turn_from_record(_assistant_record({"input_tokens": 5}, isApiErrorMessage="false"))
+    assert kept is not None  # a truthy non-boolean does not mark it an API error
+    assert kept.total_tokens == 5
+
+    dropped = turn_from_record(_assistant_record({"input_tokens": 5}, isApiErrorMessage=True))
+    assert dropped is None  # a real JSON true still drops the error turn
+
+
+def test_session_model_follows_the_latest_timestamp_turn_within_a_pass(tmp_path):
+    """Codex round 7: a session's stored model must track the latest turn by TIMESTAMP,
+    not by fold order. A newer turn followed IN-FILE by an older-timestamped one (clock
+    skew) must not relabel the session to the older turn's model."""
+    now = datetime.now(UTC)
+    newer = _assistant(session="s1", model="claude-opus-4-8", ts=now, input_tokens=10)
+    older = _assistant(
+        session="s1", model="claude-sonnet-5", ts=now - timedelta(hours=1), input_tokens=10
+    )
+    # newer is folded first; the old code's unconditional acc.model = turn.model would
+    # then let the older sonnet turn win.
+    root = _tree(tmp_path / "projects", {"a.jsonl": [newer, older]})
+    store = Store(tmp_path / "b.db")
+    store.aggregate_jsonl(root)
+
+    sessions = store.attribution_sessions(168, now=now)
+    assert len(sessions) == 1
+    assert sessions[0]["model"] == "claude-opus-4-8"  # the latest-ts turn's model
+
+
+def test_session_model_follows_latest_timestamp_across_passes(tmp_path):
+    """The cross-pass half (the _flush_sessions CASE): a later incremental pass folding
+    an OLDER-timestamped turn for the same session -- a new file written after the first
+    aggregation committed -- must not overwrite the stored model, since end_ts stays the
+    newer value."""
+    now = datetime.now(UTC)
+    store = Store(tmp_path / "b.db")
+
+    newer = _assistant(session="s1", model="claude-opus-4-8", ts=now, input_tokens=10)
+    root = _tree(tmp_path / "projects", {"a.jsonl": [newer]})
+    store.aggregate_jsonl(root)  # pass 1: session s1 -> opus, end_ts = now
+
+    older = _assistant(
+        session="s1", model="claude-sonnet-5", ts=now - timedelta(hours=1), input_tokens=10
+    )
+    (root / "proj-0" / "b.jsonl").write_text(older + "\n")
+    store.aggregate_jsonl(root)  # pass 2: older sonnet turn, same session
+
+    sessions = store.attribution_sessions(168, now=now)
+    assert len(sessions) == 1
+    assert sessions[0]["model"] == "claude-opus-4-8"  # newer-ts model preserved
+    assert sessions[0]["total_tokens"] == (10 + 50) * 2  # both turns still counted
+
+
 def test_project_labels_are_bounded_for_suffix_nested_paths():
     """Codex #6: when one path is a strict suffix of another, disambiguation stops at
     the cap and marks the shared label truncated, rather than expanding it into a

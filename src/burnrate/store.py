@@ -479,10 +479,13 @@ class Store:
             " ON CONFLICT(session_id) DO UPDATE SET"
             # start/end widen to cover the turns seen across passes; the token total
             # accumulates, and max_turn_context keeps the deepest turn ever recorded.
-            # model follows the latest turn -- a session can switch models mid-way, and
-            # this keeps the stored value agreeing with _fold_turn's last-seen choice
-            # across passes as well as within one.
-            "  model = excluded.model,"
+            # model follows the latest turn by TIMESTAMP -- a session can switch models
+            # mid-way, so keep the incoming model only when this batch's latest turn is
+            # at or after the stored one, matching _fold_turn's timestamp-guarded choice
+            # across passes as well as within one. (SQLite evaluates every SET RHS
+            # against the pre-update row, as the MIN/MAX below already rely on.)
+            "  model = CASE WHEN excluded.end_ts >= sessions_rollup.end_ts"
+            "               THEN excluded.model ELSE sessions_rollup.model END,"
             "  start_ts = MIN(sessions_rollup.start_ts, excluded.start_ts),"
             "  end_ts = MAX(sessions_rollup.end_ts, excluded.end_ts),"
             "  total_tokens = total_tokens + excluded.total_tokens,"
@@ -677,13 +680,17 @@ def _fold_turn(
             max_turn_context=turn.context_tokens,
         )
         return
+    # Update the model only when this turn is at or after the latest seen so far, so a
+    # later-folded but older-timestamped turn (clock skew, or a fold order that differs
+    # from timestamp order across files/passes) cannot relabel a session whose end_ts
+    # stays newer. Compared against end_ts BEFORE it widens below. project is stable per
+    # session (one working directory), so its first-seen value already stands.
+    if turn.ts >= acc.end_ts:
+        acc.model = turn.model
     acc.start_ts = min(acc.start_ts, turn.ts)
     acc.end_ts = max(acc.end_ts, turn.ts)
     acc.total_tokens += turn.total_tokens
     acc.max_turn_context = max(acc.max_turn_context, turn.context_tokens)
-    # Keep the model of the most recent turn seen in this pass; project is stable per
-    # session (one working directory), so the first-seen value already stands.
-    acc.model = turn.model
 
 
 def _row_to_sample(row: sqlite3.Row) -> Sample:
