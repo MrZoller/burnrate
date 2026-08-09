@@ -7,10 +7,13 @@ LABEL="com.mrzoller.burnrate"
 PLIST_DST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG="$HOME/Library/Logs/burnrate.log"
 
-# The database path install.sh actually used is recorded in the plist. Read it
-# from there first: an install that set BURNRATE_DB baked that value in, and a
-# later plain `./deploy/uninstall.sh --purge` would otherwise delete the default
-# path, report success, and leave the real database and its WAL files on disk.
+# The database path install.sh actually used is recorded in the plist. A plain
+# `./deploy/uninstall.sh --purge` uses that recorded value: an install that set
+# BURNRATE_DB baked it in, and falling back to the default here would delete the
+# default path, report success, and leave the real database and its WAL files on
+# disk. An explicit BURNRATE_DB in the environment overrides the recorded value
+# (precedence set below) -- the escape hatch for a plist that recorded an
+# unusable path.
 DB=""
 EXTRACT_FAILED=0
 if [ -f "$PLIST_DST" ]; then
@@ -34,7 +37,12 @@ if [ -f "$PLIST_DST" ]; then
     EXTRACT_FAILED=1
   fi
 fi
-DB="${DB:-${BURNRATE_DB:-$HOME/.local/share/burnrate/burnrate.db}}"
+# Precedence: an explicit BURNRATE_DB wins over the recorded value, which wins over
+# the default. A plain uninstall (BURNRATE_DB unset) still uses the recorded path;
+# setting BURNRATE_DB is how the user overrides a bad or relative record -- and it
+# must win here, or the guards below would keep recommending a command that the old
+# `${DB:-...}` order silently ignored.
+DB="${BURNRATE_DB:-${DB:-$HOME/.local/share/burnrate/burnrate.db}}"
 
 PURGE=0
 [ "${1:-}" = "--purge" ] && PURGE=1
@@ -45,8 +53,9 @@ PURGE=0
 # database in place and delete something else that happens to share the name.
 # Installs since the absolute-path fix cannot produce this, but a plist written
 # before it can still be sitting on disk. Refuse rather than guess.
-# An explicit BURNRATE_DB is honoured even then -- it is the escape hatch the message
-# below offers, so the guard must not also block it.
+# An explicit BURNRATE_DB has already overridden DB above, so an absolute one makes
+# DB absolute and passes this guard -- the escape hatch the message below offers. A
+# relative BURNRATE_DB still refuses, since it is no more resolvable than the record.
 if [ "$PURGE" -eq 1 ] && [ "$EXTRACT_FAILED" -eq 1 ] && [ -z "${BURNRATE_DB:-}" ]; then
   printf 'error: %s exists but its BURNRATE_DB could not be read, so --purge\n' "$PLIST_DST" >&2
   printf '       does not know which database this install was using. Deleting the\n' >&2
