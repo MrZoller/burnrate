@@ -297,9 +297,17 @@ def _classify_pace(projection: Projection, bucket: Bucket, elapsed_fraction: flo
     split "ahead" (clears the reset) from "to cap" (crosses it first).
     """
     status = projection.status
-    if status in (UNAVAILABLE, INSUFFICIENT_DATA) or elapsed_fraction is None:
-        # No usable window yet, or too early for the rate to mean anything. Neutral,
-        # never a colour-coded verdict on data that cannot support one.
+    # No usable window at all -- no reset reported, a reset already passed, or one out
+    # of range -- is "Unknown", not "Too early". "Too early" is a claim that a window
+    # exists and just needs more time; saying it over a reset that has already passed
+    # would contradict the same card's "Resetting..." countdown and "unavailable" hero.
+    # Ordered before the elapsed_fraction guard: the no-reset case is both UNAVAILABLE
+    # and elapsed_fraction is None, and must resolve to Unknown.
+    if status == UNAVAILABLE:
+        return UNKNOWN_PACE
+    if status == INSUFFICIENT_DATA or elapsed_fraction is None:
+        # A window we have, but too little elapsed time for the rate to mean anything.
+        # Neutral, never a colour-coded verdict on data that cannot support one.
         return TOO_EARLY
     if bucket.utilization / 100.0 <= elapsed_fraction:
         return ON_PACE

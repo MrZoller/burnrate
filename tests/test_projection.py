@@ -363,14 +363,31 @@ def test_a_bucket_younger_than_the_projection_floor_is_too_early():
     assert pace.label == "Too early to tell"
 
 
-def test_a_bucket_with_no_reset_has_no_window_and_is_too_early():
+def test_a_bucket_with_no_reset_has_no_window_and_is_unknown():
+    """No reset means no derivable window, so there is nothing to be early *about*:
+    the verdict is "Unknown", not "Too early to tell". "Too early" is reserved for a
+    window that exists but has not aged enough to project."""
     bucket = Bucket(key="seven_day", label="Weekly", utilization=40.0, resets_at=None)
 
     pace = pace_for(bucket, now=NOW, reading_at=NOW)
 
     assert pace.window_opened_at is None
     assert pace.elapsed_fraction is None
-    assert pace.status == TOO_EARLY
+    assert pace.status == UNKNOWN_PACE
+    assert pace.label == "Unknown"
+
+
+def test_a_bucket_whose_reset_has_already_passed_is_unknown():
+    """The reviewer's strongest case: a passed reset has no live window, so the gauge
+    must not say "Too early to tell" while the hero says "unavailable" and the
+    countdown says "Resetting...". All three now agree on Unknown/unavailable."""
+    resets_at = NOW - timedelta(hours=1)
+    bucket = Bucket(key="seven_day", label="Weekly", utilization=40.0, resets_at=resets_at)
+
+    pace = pace_for(bucket, now=NOW, reading_at=NOW)
+
+    assert pace.status == UNKNOWN_PACE
+    assert pace.label == "Unknown"
 
 
 def test_window_opened_at_is_one_period_before_the_reset():
