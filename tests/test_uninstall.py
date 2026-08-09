@@ -47,6 +47,39 @@ def _setup(tmp_path):
     return env, home
 
 
+def _setup_extract_failed(tmp_path):
+    """Like _setup, but plutil FAILS: it writes an error to stdout and exits
+    non-zero, so extraction fails and EXTRACT_FAILED becomes 1.
+
+    plutil's error goes to STDOUT and begins with the plist's own absolute path
+    -- exactly the trap 5b1f1f2 closed. The old `; printf X` sequencing made the
+    capture succeed unconditionally, so that error text became the "recorded
+    path", passed the absolute-path guard, and --purge deleted from it. With the
+    `&& printf X` sentinel the failure is a nonzero status and an empty capture,
+    which is what these cases assert on.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+
+    plutil = bin_dir / "plutil"
+    plutil.write_text('#!/bin/sh\nprintf "%s: invalid object\\n" "$6"\nexit 1\n')
+    plutil.chmod(0o755)
+
+    launchctl = bin_dir / "launchctl"
+    launchctl.write_text("#!/bin/sh\nexit 0\n")
+    launchctl.chmod(0o755)
+
+    home = tmp_path / "home"
+    plist = home / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+    plist.parent.mkdir(parents=True)
+    plist.write_text("<plist/>\n")
+
+    env = {k: v for k, v in os.environ.items() if k != "BURNRATE_DB"}
+    env["HOME"] = str(home)
+    env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+    return env, home
+
+
 def test_purge_refuses_a_relative_recorded_path_when_burnrate_db_is_unset(tmp_path):
     """Case A: with BURNRATE_DB unset the recorded (relative) path wins, and the
     relative-path guard must refuse rather than delete a file resolved against the
@@ -72,6 +105,47 @@ def test_purge_honours_an_absolute_burnrate_db_over_the_relative_record(tmp_path
     escape hatch; before the precedence fix the extracted relative path won and
     the guard refused despite the override."""
     env, _ = _setup(tmp_path)
+    db = tmp_path / "real" / "burnrate.db"
+    db.parent.mkdir()
+    db.write_text("samples\n")
+    env["BURNRATE_DB"] = str(db)
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "--purge"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not db.exists()
+
+
+def test_purge_refuses_when_extraction_failed_and_burnrate_db_is_unset(tmp_path):
+    """Case C: plutil failed, so the recorded DB is unknown. With BURNRATE_DB
+    unset --purge must refuse rather than fall back to the default path (which
+    could delete an unrelated database and leave the real one behind)."""
+    env, _ = _setup_extract_failed(tmp_path)
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "--purge"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "could not be read" in result.stderr
+    assert "--purge" in result.stderr
+
+
+def test_purge_honours_an_absolute_burnrate_db_when_extraction_failed(tmp_path):
+    """Case D: extraction failed, but an explicit absolute BURNRATE_DB is the
+    escape hatch the refusal message points to -- it overrides the unknown
+    record, passes the absolute-path guard, and --purge deletes exactly it."""
+    env, _ = _setup_extract_failed(tmp_path)
     db = tmp_path / "real" / "burnrate.db"
     db.parent.mkdir()
     db.write_text("samples\n")
