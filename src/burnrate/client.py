@@ -125,7 +125,15 @@ async def fetch_usage(
             raise UsageTransportError(scrub(f"{type(exc).__name__}: {exc}", access_token)) from exc
 
         if response.status_code in (401, 403):
-            raise UsageAuthError(f"HTTP {response.status_code}", status_code=response.status_code)
+            # Body carried like every other error's. A 403 usually explains itself --
+            # which organisation policy, which missing entitlement -- and that
+            # explanation is the most useful thing on the whole failure path, since
+            # unlike a 401 the user cannot fix it by signing in again.
+            raise UsageAuthError(
+                f"HTTP {response.status_code}",
+                status_code=response.status_code,
+                body=_short_body(response, access_token, limit=ARCHIVE_BODY_LIMIT),
+            )
         if response.status_code >= 400:
             raise UsageHTTPError(
                 response.status_code,

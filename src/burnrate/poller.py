@@ -351,9 +351,13 @@ def _unchanged_credential_error(exc: UsageAuthError) -> UsageAuthError:
     else:
         advice = "sign in with Claude Code to refresh it"
     label = f"HTTP {status}" if status else "Authorization failed"
+    # The body comes forward too. This replaces the exception rather than re-raising
+    # it, so anything not copied across is lost -- and the body is the half that says
+    # why the credential was refused.
     return UsageAuthError(
         f"{label} and the stored credential has not changed -- {advice}",
         status_code=status,
+        body=exc.body,
     )
 
 

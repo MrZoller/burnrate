@@ -285,3 +285,29 @@ async def test_an_auth_error_records_which_status_it_was(status):
             await fetch_usage(TOKEN, client=client)
 
     assert excinfo.value.status_code == status
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_an_auth_error_carries_its_body_for_the_archive(status):
+    """Regression: the auth branch raised with the default empty body, so the poller's
+    archive step skipped it. A 403 usually explains itself -- which policy, which
+    missing entitlement -- and that explanation is the most useful thing on the whole
+    failure path, since unlike a 401 the user cannot fix it by signing in again."""
+    denial = '{"error":{"type":"permission_error","message":"organization has disabled this"}}'
+    async with _client(lambda r: httpx.Response(status, text=denial)) as client:
+        with pytest.raises(UsageAuthError) as excinfo:
+            await fetch_usage(TOKEN, client=client)
+
+    assert "permission_error" in excinfo.value.body
+    assert "organization has disabled this" in excinfo.value.body
+
+
+async def test_an_auth_error_body_is_redacted():
+    leaky = f'{{"error":"rejected token {TOKEN}"}}'
+    async with _client(lambda r: httpx.Response(403, text=leaky)) as client:
+        with pytest.raises(UsageAuthError) as excinfo:
+            await fetch_usage(TOKEN, client=client)
+
+    assert TOKEN not in excinfo.value.body
+    assert "sk-ant" not in excinfo.value.body
+    assert REDACTED in excinfo.value.body

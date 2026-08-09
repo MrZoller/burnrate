@@ -711,3 +711,46 @@ async def test_a_recorded_failure_is_scrubbed(store, monkeypatch):
 
     assert token not in poller.status.last_error
     assert "sk-ant" not in poller.status.last_error
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_an_auth_denial_body_reaches_the_archive(store, monkeypatch, status):
+    """Two halves to this: the client has to attach the body, and
+    `_unchanged_credential_error` has to carry it forward -- it builds a replacement
+    exception, so anything not copied across is lost."""
+    _credentials(monkeypatch, "same-token")
+    denial = '{"error":{"type":"permission_error","message":"organization has disabled this"}}'
+
+    def handler(token, n):
+        raise UsageAuthError(f"HTTP {status}", status_code=status, body=denial)
+
+    _fetches(monkeypatch, handler)
+    poller = Poller(store)
+
+    assert await poller.poll_once() is None
+    assert poller.status.last_error_kind == "auth"
+
+    with store._connect() as conn:
+        bodies = [row["body"] for row in conn.execute("SELECT body FROM raw_snapshots")]
+
+    assert len(bodies) == 1
+    assert "organization has disabled this" in bodies[0]
+
+
+async def test_the_replacement_auth_error_keeps_the_status_and_the_body(store, monkeypatch):
+    """The message is rewritten; nothing else may be dropped in the process."""
+    _credentials(monkeypatch, "same-token")
+
+    def handler(token, n):
+        raise UsageAuthError("HTTP 403", status_code=403, body='{"why":"policy"}')
+
+    _fetches(monkeypatch, handler)
+    poller = Poller(store)
+
+    await poller.poll_once()
+
+    with store._connect() as conn:
+        bodies = [row["body"] for row in conn.execute("SELECT body FROM raw_snapshots")]
+
+    assert "policy" in bodies[0]
+    assert "HTTP 403" in poller.status.last_error
