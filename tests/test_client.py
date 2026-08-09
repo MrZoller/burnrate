@@ -273,3 +273,15 @@ async def test_a_credential_with_a_control_character_does_not_leak_into_the_erro
     assert TOKEN not in message
     assert "sk-ant" not in message
     assert REDACTED in message
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_an_auth_error_records_which_status_it_was(status):
+    """The poller's remediation advice depends on it: 401 means the token we hold is
+    no longer good, which signing in fixes; 403 means it was understood and refused,
+    which it does not."""
+    async with _client(lambda r: httpx.Response(status, json={"error": "nope"})) as client:
+        with pytest.raises(UsageAuthError) as excinfo:
+            await fetch_usage(TOKEN, client=client)
+
+    assert excinfo.value.status_code == status

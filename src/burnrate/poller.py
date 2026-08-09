@@ -301,14 +301,11 @@ class Poller:
         self.status.credential_source = credential.source
         try:
             return await fetch_usage(credential.access_token, client=self._client)
-        except UsageAuthError:
+        except UsageAuthError as exc:
             retry = await asyncio.to_thread(read_credential)
             self.status.credential_source = retry.source
             if retry.access_token == credential.access_token:
-                raise UsageAuthError(
-                    "HTTP 401 and the stored credential has not changed -- "
-                    "sign in with Claude Code to refresh it"
-                ) from None
+                raise _unchanged_credential_error(exc) from None
             return await fetch_usage(retry.access_token, client=self._client)
 
     def _record_failure(self, kind: str, message: str) -> None:
@@ -335,6 +332,29 @@ class Poller:
             return None
         now = now or datetime.now(UTC)
         return max(0.0, (now - reference).total_seconds())
+
+
+def _unchanged_credential_error(exc: UsageAuthError) -> UsageAuthError:
+    """The message for a rejected credential the re-read did not change.
+
+    Keeps the real status, and gives advice that matches it. Both 401 and 403 arrive
+    as UsageAuthError, and this message used to say "HTTP 401 ... sign in with Claude
+    Code" for either -- so an account or permission denial was reported as an expired
+    token, sending the user to do the one thing that cannot fix it.
+    """
+    status = exc.status_code
+    if status == 403:
+        advice = (
+            "the credential was understood and refused, so this is a permissions or "
+            "account problem rather than a stale token"
+        )
+    else:
+        advice = "sign in with Claude Code to refresh it"
+    label = f"HTTP {status}" if status else "Authorization failed"
+    return UsageAuthError(
+        f"{label} and the stored credential has not changed -- {advice}",
+        status_code=status,
+    )
 
 
 def _error_kind(exc: UsageFetchError) -> str:

@@ -126,8 +126,13 @@ printf '  url   : %s/\n' "$PUBLIC_URL"
 # what it means rather than merely for having arrived.
 probe_health() {
   local response code body
-  response=$(curl -sS --max-time 2 -w '\n%{http_code}' "$PROBE_URL/api/healthz" 2>/dev/null) \
-    || { printf 'down'; return; }
+  # --noproxy '*' because this is a local check of a listener we just started. With
+  # http_proxy or ALL_PROXY set and the bind address absent from NO_PROXY, curl sent
+  # the request to the proxy instead: a healthy agent then timed out as "down", or the
+  # proxy's own reply was classified as "foreign". Measured -- with ALL_PROXY pointing
+  # at a closed port the probe returned 000, and --noproxy restored the 200.
+  response=$(curl -sS --noproxy '*' --max-time 2 -w '\n%{http_code}' \
+    "$PROBE_URL/api/healthz" 2>/dev/null) || { printf 'down'; return; }
   code=${response##*$'\n'}
   body=${response%$'\n'*}
   case "$body" in

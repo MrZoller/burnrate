@@ -55,7 +55,17 @@ class UsageFetchError(RuntimeError):
 
 
 class UsageAuthError(UsageFetchError):
-    """401/403 -- our copy of the credential is stale or rejected."""
+    """401/403 -- our copy of the credential is stale or rejected.
+
+    Carries the status because the two mean different things and want different
+    advice: 401 says the token we hold is no longer good, which signing in again
+    fixes; 403 says the credential was understood and refused, which it does not.
+    Collapsing them let a permission denial be reported as an expired token.
+    """
+
+    def __init__(self, *args: object, status_code: int | None = None, body: str = "") -> None:
+        self.status_code = status_code
+        super().__init__(*args, body=body)
 
 
 class UsageHTTPError(UsageFetchError):
@@ -115,7 +125,7 @@ async def fetch_usage(
             raise UsageTransportError(scrub(f"{type(exc).__name__}: {exc}", access_token)) from exc
 
         if response.status_code in (401, 403):
-            raise UsageAuthError(f"HTTP {response.status_code}")
+            raise UsageAuthError(f"HTTP {response.status_code}", status_code=response.status_code)
         if response.status_code >= 400:
             raise UsageHTTPError(
                 response.status_code,

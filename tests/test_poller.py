@@ -109,15 +109,53 @@ async def test_a_401_with_an_unchanged_token_gives_up_rather_than_refreshing(sto
     _credentials(monkeypatch, "same-token")
 
     def handler(token, n):
-        raise UsageAuthError("HTTP 401")
+        raise UsageAuthError("HTTP 401", status_code=401)
 
     seen = _fetches(monkeypatch, handler)
     poller = Poller(store)
 
     assert await poller.poll_once() is None
     assert seen == ["same-token"], "must not retry the identical token"
+    assert "HTTP 401" in poller.status.last_error
     assert "sign in with Claude Code" in poller.status.last_error
     assert poller.status.last_error_kind == "auth"
+
+
+async def test_a_403_is_not_reported_as_a_stale_token(store, monkeypatch):
+    """Regression: both statuses arrive as UsageAuthError and this message hard-coded
+    "HTTP 401 ... sign in with Claude Code", so a permissions or account denial was
+    reported as an expired token -- sending the user to do the one thing that cannot
+    fix it."""
+    _credentials(monkeypatch, "same-token")
+
+    def handler(token, n):
+        raise UsageAuthError("HTTP 403", status_code=403)
+
+    _fetches(monkeypatch, handler)
+    poller = Poller(store)
+
+    assert await poller.poll_once() is None
+    assert "HTTP 403" in poller.status.last_error
+    assert "401" not in poller.status.last_error
+    assert "sign in with Claude Code" not in poller.status.last_error
+    assert "permissions or account" in poller.status.last_error
+
+
+async def test_an_auth_error_of_unknown_status_still_reads_sensibly(store, monkeypatch):
+    """Nothing constructs one without a status today, but the message must not say
+    "HTTP None" if something ever does."""
+    _credentials(monkeypatch, "same-token")
+
+    def handler(token, n):
+        raise UsageAuthError("auth failed")
+
+    _fetches(monkeypatch, handler)
+    poller = Poller(store)
+
+    await poller.poll_once()
+
+    assert "None" not in poller.status.last_error
+    assert "Authorization failed" in poller.status.last_error
 
 
 async def test_the_credential_read_does_not_block_the_event_loop(store, monkeypatch, live_response):
