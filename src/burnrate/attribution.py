@@ -161,6 +161,7 @@ def turn_from_record(record: dict) -> Turn | None:
     model = message.get("model")
     if not isinstance(model, str) or not model or model == SYNTHETIC_MODEL:
         return None
+    model = _utf8_safe(model)
 
     usage = message.get("usage")
     if not isinstance(usage, dict):
@@ -184,7 +185,7 @@ def turn_from_record(record: dict) -> Turn | None:
         ts=ts,
         project=_str_or(record.get("cwd"), UNKNOWN),
         model=model,
-        is_sidechain=bool(record.get("isSidechain")),
+        is_sidechain=record.get("isSidechain") is True,
         session_id=_str_or(record.get("sessionId"), UNKNOWN),
         input_tokens=input_tokens,
         output_tokens=output_tokens,
@@ -292,8 +293,27 @@ def _non_negative_int(value: object) -> int:
     return 0
 
 
+def _utf8_safe(value: str) -> str:
+    """Return ``value`` if it encodes to UTF-8, else a lossy repair of it.
+
+    A JSON string may carry a lone surrogate (an unpaired ``\\uD800``): it decodes
+    to a Python ``str`` fine, but raises ``UnicodeEncodeError`` when SQLite binds
+    it. Because the aggregation flush shares one transaction with the watermark
+    write, that raise would roll back the whole batch and leave the byte offset
+    un-advanced -- so every later pass re-reads the same line and re-raises, the
+    same permanent-freeze failure the timestamp (``_parse_timestamp``) and
+    recursion guards already exist to prevent. Repair rather than drop, so the
+    turn's tokens still count somewhere.
+    """
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return value.encode("utf-8", "replace").decode("utf-8")
+    return value
+
+
 def _str_or(value: object, default: str) -> str:
-    return value if isinstance(value, str) and value else default
+    return _utf8_safe(value) if isinstance(value, str) and value else default
 
 
 def _parse_timestamp(raw: object) -> datetime | None:

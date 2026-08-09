@@ -523,10 +523,16 @@ class Store:
         now = now or datetime.now(UTC)
         cutoff_at = (now - timedelta(hours=hours)).replace(minute=0, second=0, microsecond=0)
         cutoff = _iso(cutoff_at)
-        # Upper bound at now: no legitimate in-window bucket is in the future, so this
-        # only excludes garbage (a future-dated hour from clock skew or a bad timestamp)
-        # that a lower-bound-only filter would otherwise include forever. Asymmetric --
-        # there is no undercount cost, unlike the lower-bound flooring.
+        # Upper bound at now, so a future-dated hour (clock skew or a bad timestamp)
+        # that a lower-bound-only filter would include forever is excluded. This bounds
+        # the HOUR, not the turn: a future turn inside the CURRENT partial hour floors
+        # to hour_start <= now and is still counted -- the hourly rollup has no per-turn
+        # granularity to exclude it -- so its tokens read a little early, and its session
+        # (bounded by exact end_ts <= now in attribution_sessions) is briefly absent from
+        # that panel. Both self-heal within the hour once wall-clock passes the timestamp;
+        # rejecting future turns at ingestion instead would advance the watermark past a
+        # legitimately clock-skewed turn and lose it for good. Asymmetric -- no undercount
+        # cost, unlike the lower-bound flooring.
         upper = _iso(now)
         window = (cutoff, upper)
         with self._connect() as conn:

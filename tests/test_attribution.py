@@ -340,6 +340,76 @@ def test_future_dated_data_is_excluded_from_the_window(tmp_path):
     assert ids == {"present"}  # the future-dated session is excluded
 
 
+def test_lone_surrogate_metadata_is_repaired():
+    """Codex round 6: a valid JSON string can carry a lone surrogate (an unpaired
+    \\uD800). It decodes to a str fine but raises UnicodeEncodeError when SQLite binds
+    it, and because the flush shares its transaction with the watermark that raise would
+    roll the batch back and freeze the offset. The parser must repair cwd / model /
+    sessionId to UTF-8-encodable strings so nothing unbindable reaches the store."""
+    turn = turn_from_record(
+        {
+            "type": "assistant",
+            "cwd": "/work/\ud800proj",
+            "sessionId": "s\ud801",
+            "timestamp": datetime.now(UTC).isoformat(),
+            "message": {
+                "model": "claude-\ud802opus",
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            },
+        }
+    )
+    assert turn is not None
+    # Every string that reaches a SQLite bind is now UTF-8-encodable (no raise).
+    for value in (turn.project, turn.model, turn.session_id):
+        value.encode("utf-8")
+
+
+def test_a_lone_surrogate_does_not_freeze_aggregation(tmp_path):
+    """The end-to-end failure Codex round 6 describes: a record whose cwd carries a lone
+    surrogate must still let aggregate_jsonl COMMIT and advance the watermark. Bound
+    verbatim it raises UnicodeEncodeError inside the flush, rolling the batch (watermarks
+    included) back so every later pass re-reads the poison line and re-raises forever."""
+    now = datetime.now(UTC)
+    poison = json.dumps(
+        {
+            "type": "assistant",
+            "cwd": "/work/\ud800bad",
+            "sessionId": "s1",
+            "timestamp": now.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+            "message": {
+                "model": "claude-opus-4-8",
+                "usage": {"input_tokens": 11, "output_tokens": 0},
+            },
+        }
+    )
+    healthy = _assistant(ts=now, cwd="/work/a", input_tokens=3, output_tokens=0)
+    root = _tree(tmp_path / "projects", {"a.jsonl": [poison, healthy]})
+    store = Store(tmp_path / "b.db")
+
+    first = store.aggregate_jsonl(root)  # must not raise UnicodeEncodeError
+    second = store.aggregate_jsonl(root)
+
+    assert first.emitted == 2
+    assert second.emitted == 0  # committed and watermark advanced, not re-read forever
+    # The surrogate turn's tokens still count, under a repaired (encodable) project label.
+    totals = dict(store.attribution_totals(168, now=now)["by_project"])
+    assert totals["/work/a"] == 3
+    assert sum(totals.values()) == 3 + 11
+
+
+def test_a_non_boolean_sidechain_flag_is_not_a_subagent():
+    """Codex round 6: isSidechain must be JSON `true` to mean a subagent. bool("false")
+    is True, which would misfile a string-flagged main turn under Subagents; `is True`
+    accepts only a real boolean, matching every other extracted field's type guard."""
+    main = turn_from_record(_assistant_record({"input_tokens": 5}, isSidechain="false"))
+    assert main is not None
+    assert main.is_sidechain is False  # a truthy non-boolean is NOT a subagent
+
+    sub = turn_from_record(_assistant_record({"input_tokens": 5}, isSidechain=True))
+    assert sub is not None
+    assert sub.is_sidechain is True  # a real JSON true still reads as a subagent
+
+
 def test_project_labels_are_bounded_for_suffix_nested_paths():
     """Codex #6: when one path is a strict suffix of another, disambiguation stops at
     the cap and marks the shared label truncated, rather than expanding it into a
