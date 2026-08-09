@@ -12,17 +12,27 @@ LOG="$HOME/Library/Logs/burnrate.log"
 # later plain `./deploy/uninstall.sh --purge` would otherwise delete the default
 # path, report success, and leave the real database and its WAL files on disk.
 DB=""
+EXTRACT_FAILED=0
 if [ -f "$PLIST_DST" ]; then
-  # Captured through a sentinel, because `$(...)` strips ALL trailing newlines and
-  # `plutil ... raw` appends one of its own. For an ordinary path those cancel out; for
-  # a path that itself ends in a newline both went, so --purge deleted the shortened
-  # name -- possibly an unrelated database -- and left the real one in place while
-  # reporting success. The X survives the strip, and removing it leaves the bytes
-  # exactly as plutil wrote them; then exactly one newline comes off, which is
-  # plutil's terminator and not part of the value.
-  DB=$(plutil -extract EnvironmentVariables.BURNRATE_DB raw -o - "$PLIST_DST" 2>/dev/null; printf X) || true
-  DB=${DB%X}
-  DB=${DB%$'\n'}
+  # `&& printf X`, not `; printf X`. The sentinel exists because `$(...)` strips ALL
+  # trailing newlines while `plutil ... raw` appends one of its own -- for an ordinary
+  # path those cancel out, but a path ending in a newline lost both, so --purge deleted
+  # the shortened name and left the real database in place. Sequencing it with `;`
+  # however made the substitution succeed unconditionally, which hid plutil's own
+  # failure: a damaged plist or a missing key then produced a bogus path silently. It
+  # is worse than falling back to the default, because plutil writes its error to
+  # STDOUT -- so the captured "path" became the error text, which begins with the
+  # plist's own absolute path and therefore passed the absolute-path guard below.
+  # `--purge` then removed nothing and said it had. With `&&` the sentinel is only
+  # written on success, so failure is a nonzero status here and an empty capture.
+  if DB=$(plutil -extract EnvironmentVariables.BURNRATE_DB raw -o - "$PLIST_DST" 2>/dev/null \
+            && printf X); then
+    DB=${DB%X}
+    DB=${DB%$'\n'}
+  else
+    DB=""
+    EXTRACT_FAILED=1
+  fi
 fi
 DB="${DB:-${BURNRATE_DB:-$HOME/.local/share/burnrate/burnrate.db}}"
 
@@ -35,6 +45,16 @@ PURGE=0
 # database in place and delete something else that happens to share the name.
 # Installs since the absolute-path fix cannot produce this, but a plist written
 # before it can still be sitting on disk. Refuse rather than guess.
+# An explicit BURNRATE_DB is honoured even then -- it is the escape hatch the message
+# below offers, so the guard must not also block it.
+if [ "$PURGE" -eq 1 ] && [ "$EXTRACT_FAILED" -eq 1 ] && [ -z "${BURNRATE_DB:-}" ]; then
+  printf 'error: %s exists but its BURNRATE_DB could not be read, so --purge\n' "$PLIST_DST" >&2
+  printf '       does not know which database this install was using. Deleting the\n' >&2
+  printf '       default path could remove an unrelated one and leave the real one\n' >&2
+  printf '       behind. Pass BURNRATE_DB=/absolute/path to say explicitly.\n' >&2
+  exit 1
+fi
+
 if [ "$PURGE" -eq 1 ]; then
   case "$DB" in
     /*) ;;

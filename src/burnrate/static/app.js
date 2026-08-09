@@ -9,7 +9,14 @@
  * escalates to a banner instead of quietly leaving the last good numbers up.
  */
 
-const REFRESH_MS = 60_000;
+// Refresh bounds. The cadence follows the backend's configured interval -- reported by
+// /api/now -- because a fixed 60s meant a sub-second poll interval filled the store
+// with readings the page would not show for another minute. Clamped at both ends: the
+// floor stops a 0.5s interval turning into two fetches a second per open tab, and the
+// ceiling keeps the staleness line and the banner moving even on an hourly cadence.
+const REFRESH_MS_DEFAULT = 60_000;
+const REFRESH_MS_MIN = 5_000;
+const REFRESH_MS_MAX = 60_000;
 const GAUGE_SWEEP = 270; // degrees, centered on 12 o'clock
 const GAUGE_START = -135;
 
@@ -45,7 +52,18 @@ const state = {
   // reported rather than from our own clock, so an outage reports the data's real
   // age instead of the time since we last managed to fetch it.
   readingAt: null,
+  // How far this browser's clock sits from the server's. The dashboard is meant to be
+  // read from other machines on the tailnet, and every timestamp in the payloads is the
+  // server's -- so comparing them against a local Date.now() shifted the chart window
+  // by the skew: points past the right edge on a slow clock, a false empty tail on a
+  // fast one. Measured from `generated_at` and re-measured on every successful fetch.
+  clockSkewMs: 0,
 };
+
+/** Now, on the server's clock. Advances in real time, unlike `generated_at` alone. */
+function serverNow() {
+  return Date.now() - state.clockSkewMs;
+}
 
 /* ---------------------------------------------------------------- utilities */
 
@@ -207,7 +225,9 @@ function renderGauges(buckets) {
 }
 
 function tickCountdowns() {
-  const now = Date.now();
+  // Server clock: resets_at comes from the response, so a skewed local clock would
+  // shift every countdown on the page by that skew.
+  const now = serverNow();
   for (const node of els.gauges.querySelectorAll(".gauge__countdown")) {
     const iso = node.getAttribute("data-resets-at");
     if (!iso) continue;
@@ -278,7 +298,7 @@ function renderChart(series, windowStart, windowEnd, currency = {}) {
   if (newest) {
     nowText = isCurrent
       ? `now ${pct(newest.v)}`
-      : `last ${pct(newest.v)} · ${formatAge((Date.now() - newest.t) / 1000)}`;
+      : `last ${pct(newest.v)} · ${formatAge((serverNow() - newest.t) / 1000)}`;
   }
 
   const head = el("div", { class: "chart__head" }, [
@@ -613,6 +633,12 @@ async function refresh({ history = true } = {}) {
     const data = await loadNow();
     state.now = data;
     state.buckets = data.buckets || [];
+    // Re-measured every fetch rather than once, so a clock that gets corrected while
+    // the page is open corrects with it. Ignored if unparseable -- a zero skew is the
+    // old behaviour, which is right when the clocks agree and no worse when they do not.
+    const generated = Date.parse(data.generated_at);
+    if (Number.isFinite(generated)) state.clockSkewMs = Date.now() - generated;
+    applyRefreshCadence(data.poll_interval_seconds);
     // When the READING was taken, not when we fetched it. A successful fetch of
     // an already-stale snapshot used to stamp this with the browser's clock, so
     // if the backend then went away the outage message read "Stale since 60s ago"
@@ -730,7 +756,7 @@ function renderHistoryTable(series, isCurrentFor) {
     if (!stats) continue;
     const latest = isCurrentFor(s.key)
       ? pct(stats.last.v)
-      : `${pct(stats.last.v)} (${formatAge((Date.now() - stats.last.t) / 1000)})`;
+      : `${pct(stats.last.v)} (${formatAge((serverNow() - stats.last.t) / 1000)})`;
     rows.push(
       el("tr", {}, [
         el("td", { text: s.label || s.key }),
@@ -750,7 +776,10 @@ function renderHistoryTable(series, isCurrentFor) {
 }
 
 function renderCharts(data) {
-  const end = Date.now();
+  // Anchored on the server's clock, since every point below carries a server
+  // timestamp. Against a local Date.now() a browser running behind pushed the newest
+  // points past the right edge, and one running ahead drew a tail of empty time.
+  const end = serverNow();
   // The window comes from the payload, not from state.hours. The backend already
   // reports the range it answered for, and taking it from there means a redraw from
   // cache -- what the outage path does -- cannot scale old points against a range
@@ -823,6 +852,25 @@ els.range.addEventListener("click", (event) => {
   refreshHistory();
 });
 
+/* The refresh timer, rescheduled when the backend reports a different cadence than the
+ * one currently in effect. A fixed minute meant a faster poll interval -- the config
+ * validator accepts sub-second values -- filled the store with readings the page would
+ * not show for up to another minute. Rescheduled only on a real change, so the ordinary
+ * case sets one interval on the first response and never touches it again. */
+let refreshMs = REFRESH_MS_DEFAULT;
+let refreshTimer = null;
+
+function applyRefreshCadence(pollIntervalSeconds) {
+  const seconds = Number(pollIntervalSeconds);
+  const wanted = Number.isFinite(seconds) && seconds > 0
+    ? clamp(seconds * 1000, REFRESH_MS_MIN, REFRESH_MS_MAX)
+    : REFRESH_MS_DEFAULT;
+  if (refreshTimer !== null && wanted === refreshMs) return;
+  refreshMs = wanted;
+  if (refreshTimer !== null) clearInterval(refreshTimer);
+  refreshTimer = setInterval(() => refresh(), refreshMs);
+}
+
 setInterval(tickCountdowns, 1000);
-setInterval(() => refresh(), REFRESH_MS);
+applyRefreshCadence(null);
 refresh();
