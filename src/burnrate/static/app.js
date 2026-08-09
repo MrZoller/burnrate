@@ -154,9 +154,19 @@ function arcPath(cx, cy, r, startAngle, endAngle) {
   return `M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${r} ${r} 0 ${largeArc} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}`;
 }
 
-function renderGauge(bucket) {
+function renderGauge(bucket, stale) {
   const utilization = clamp(Number(bucket.utilization) || 0, 0, 100);
   const status = stateFor(utilization);
+  // A stale reading is genuinely the last known number, so keep the percentage and
+  // the arc's magnitude -- but strip the present-tense judgement. `HEALTHY`/`Watch`/
+  // `Critical` is an assertion about a value we know to be old, so on stale the status
+  // word becomes a neutral "Stale" and the colour drops to muted: the dataviz rule
+  // forbids the colour carrying a meaning the label no longer does, so both go together.
+  // The banner and freshness line already say how old the reading is. This brings the
+  // gauges in line with the hero, charts and history labels, which are already
+  // staleness-aware (the details-table status word still is not -- see follow-up).
+  const stateColor = stale ? "var(--ink-muted)" : status.color;
+  const stateLabel = stale ? "Stale" : status.label;
   const cx = 80;
   const cy = 80;
   const r = 62;
@@ -165,14 +175,14 @@ function renderGauge(bucket) {
   const svg = el("svg", {
     viewBox: "0 0 160 136",
     role: "img",
-    "aria-label": `${bucket.label}: ${pct(utilization)} used, ${status.label}`,
+    "aria-label": `${bucket.label}: ${pct(utilization)} used, ${stateLabel}`,
   });
 
   svg.appendChild(
     el("path", {
       d: arcPath(cx, cy, r, GAUGE_START, GAUGE_START + GAUGE_SWEEP),
       fill: "none",
-      stroke: status.color,
+      stroke: stateColor,
       "stroke-opacity": "0.16",
       "stroke-width": "12",
       "stroke-linecap": "round",
@@ -186,7 +196,7 @@ function renderGauge(bucket) {
       el("path", {
         d: arcPath(cx, cy, r, GAUGE_START, endAngle),
         fill: "none",
-        stroke: status.color,
+        stroke: stateColor,
         "stroke-width": "12",
         "stroke-linecap": "round",
       }),
@@ -195,7 +205,7 @@ function renderGauge(bucket) {
 
   const readout = el("div", { class: "gauge__readout" }, [
     el("div", { class: "gauge__pct", text: pct(utilization) }),
-    el("div", { class: "gauge__state", style: `color:${status.color}`, text: status.label }),
+    el("div", { class: "gauge__state", style: `color:${stateColor}`, text: stateLabel }),
   ]);
 
   const countdown = el("div", {
@@ -219,8 +229,8 @@ function renderGauge(bucket) {
   return card;
 }
 
-function renderGauges(buckets) {
-  els.gauges.replaceChildren(...buckets.map(renderGauge));
+function renderGauges(buckets, stale) {
+  els.gauges.replaceChildren(...buckets.map((b) => renderGauge(b, stale)));
   tickCountdowns();
 }
 
@@ -671,7 +681,7 @@ async function refresh({ history = true } = {}) {
       data.staleness_seconds == null ? null : Date.now() - data.staleness_seconds * 1000;
 
     renderBanner(data, null);
-    renderGauges(state.buckets);
+    renderGauges(state.buckets, data.stale === true);
     renderTable(state.buckets);
     renderHero(data.projection, state.buckets.find((b) => b.key === "seven_day"));
 
@@ -705,6 +715,10 @@ async function refresh({ history = true } = {}) {
     // backend is what just failed, and the labels recompute their age from the
     // clock, so they keep ageing while the outage lasts.
     if (state.now && !state.now.stale) state.now = { ...state.now, stale: true };
+    // Re-render the gauges muted for the same reason the hero is redrawn below: the
+    // backend just failed, so the last buckets are now of unknown age and must not keep
+    // asserting a live HEALTHY/Watch/Critical judgement over them.
+    renderGauges(state.buckets, true);
     if (state.history) renderCharts(state.history);
     // The hero too, and it is the most important of the three: a cap time is the
     // one thing on this page a reader would act on, and the backend deliberately
