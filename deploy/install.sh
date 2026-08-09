@@ -12,8 +12,6 @@ PLIST_DST="$HOME/Library/LaunchAgents/$LABEL.plist"
 PYTHON="$REPO/.venv/bin/python"
 LOG="$HOME/Library/Logs/burnrate.log"
 
-HOST="${BURNRATE_HOST:-0.0.0.0}"
-PORT="${BURNRATE_PORT:-8377}"
 DB="${BURNRATE_DB:-$HOME/.local/share/burnrate/burnrate.db}"
 # Absolute, always. A relative path is resolved by the agent against the plist's
 # WorkingDirectory ($REPO) but by `uninstall.sh --purge` against whatever
@@ -25,12 +23,6 @@ case "$DB" in
   /*) ;;
   *) DB="$PWD/$DB" ;;
 esac
-# launchd starts the agent with none of this shell's environment, so anything not
-# baked into the plist is simply absent at runtime. The README documents all four
-# of these as install-time overrides; the interval was the one not being captured,
-# so setting it did nothing and the agent quietly polled at the 60s default.
-INTERVAL="${BURNRATE_POLL_INTERVAL:-60}"
-
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 
 [ "$(uname -s)" = "Darwin" ] || die "launchd is macOS-only; run 'uv run burnrate' directly elsewhere"
@@ -44,6 +36,23 @@ fi
 [ -x "$PYTHON" ] || die "no interpreter at $PYTHON — run 'uv sync' in $REPO"
 
 "$PYTHON" -c 'import burnrate' 2>/dev/null || die "burnrate is not importable — run 'uv sync' in $REPO"
+
+# The effective settings come from the package, not from a second copy of its
+# validation rules written in shell. The installer used to keep whatever was in the
+# environment, so a BURNRATE_PORT of "abc" or 99999 went into the plist and into the
+# readiness URL while Config.from_env quietly rejected it and the agent listened on
+# 8377 -- healthy service, installer probing a port nobody was on, wrong URL
+# printed. Asking the package makes the two agree by construction rather than by
+# my keeping two implementations in step.
+#
+# launchd also starts the agent with none of this shell's environment, so whatever
+# comes back here has to be baked into the plist or it is simply absent at runtime.
+EFFECTIVE=$(BURNRATE_DB="$DB" "$PYTHON" -m burnrate.config) \
+  || die "could not read the effective configuration"
+{ read -r HOST; read -r PORT; read -r INTERVAL; } <<EOF
+$EFFECTIVE
+EOF
+[ -n "$HOST" ] && [ -n "$PORT" ] && [ -n "$INTERVAL" ] || die "incomplete configuration: $EFFECTIVE"
 
 mkdir -p "$HOME/Library/LaunchAgents" "$(dirname "$LOG")" "$(dirname "$DB")"
 

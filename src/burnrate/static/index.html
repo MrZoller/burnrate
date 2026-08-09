@@ -82,6 +82,27 @@
             <tbody id="table-body"></tbody>
           </table>
         </div>
+        <!-- The charts above are the only place the history is otherwise
+             represented, and their accessible description used to point here for
+             values this table did not carry. -->
+        <div class="table-scroll">
+          <table id="history-table">
+            <caption class="visually-hidden">
+              Range and latest value of each usage bucket over the selected window
+            </caption>
+            <thead>
+              <tr>
+                <th scope="col">Bucket</th>
+                <th scope="col">Window</th>
+                <th scope="col">Latest</th>
+                <th scope="col">Lowest</th>
+                <th scope="col">Highest</th>
+                <th scope="col">Samples</th>
+              </tr>
+            </thead>
+            <tbody id="history-body"></tbody>
+          </table>
+        </div>
       </details>
 
       <footer class="footer">

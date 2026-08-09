@@ -5,6 +5,7 @@ Config.from_env() at import time. That import-time call is gone, so they are
 tested directly.
 """
 
+import os
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from burnrate.config import (
     DEFAULT_PORT,
     MAX_POLL_INTERVAL_SECONDS,
     Config,
+    print_effective,
 )
 
 
@@ -132,6 +134,48 @@ def test_the_freshness_window_scales_with_the_interval(interval, expected):
 def test_the_freshness_window_never_drops_below_the_floor():
     """A sub-second interval must not make the dashboard hair-trigger."""
     assert Config(poll_interval=0.5).stale_after_seconds == 180.0
+
+
+def test_print_effective_order_is_the_installers_contract(monkeypatch, capsys):
+    """install.sh reads these three lines positionally, so a reordering here would
+    silently misconfigure the agent instead of failing. Pinned rather than trusted."""
+    monkeypatch.setenv("BURNRATE_HOST", "127.0.0.1")
+    monkeypatch.setenv("BURNRATE_PORT", "9999")
+    monkeypatch.setenv("BURNRATE_POLL_INTERVAL", "15")
+
+    print_effective()
+
+    assert capsys.readouterr().out.splitlines() == ["127.0.0.1", "9999", "15.0"]
+
+
+@pytest.mark.parametrize("bad_port", ["abc", "0", "99999", "-1"])
+def test_the_installer_is_told_the_port_the_app_will_really_use(monkeypatch, capsys, bad_port):
+    """The whole point of routing the installer through here: it used to keep the
+    raw value, so the plist and the readiness URL said one port while the agent
+    listened on 8377 -- a healthy service the installer declared unhealthy."""
+    monkeypatch.setenv("BURNRATE_PORT", bad_port)
+
+    print_effective()
+
+    assert capsys.readouterr().out.splitlines()[1] == str(DEFAULT_PORT)
+
+
+def test_print_effective_is_runnable_as_a_module(monkeypatch):
+    """install.sh invokes `python -m burnrate.config`, so that entry point is part
+    of the contract, not an implementation detail."""
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-m", "burnrate.config"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "BURNRATE_PORT": "abc", "BURNRATE_POLL_INTERVAL": "1e20"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [DEFAULT_HOST, str(DEFAULT_PORT), "60.0"]
 
 
 def test_the_default_binding_is_lan_reachable():

@@ -27,6 +27,7 @@ const els = {
   gauges: document.getElementById("gauges"),
   charts: document.getElementById("charts"),
   tableBody: document.getElementById("table-body"),
+  historyBody: document.getElementById("history-body"),
   range: document.getElementById("range"),
   tooltip: document.getElementById("tooltip"),
   footerMeta: document.getElementById("footer-meta"),
@@ -223,6 +224,41 @@ function tickCountdowns() {
 
 const CHART = { w: 760, h: 168, left: 36, right: 14, top: 12, bottom: 26 };
 
+/** Summary statistics for one series, shared by its aria-label and the table. */
+function seriesStats(points) {
+  if (!points.length) return null;
+  const values = points.map((p) => p.v);
+  return {
+    first: points[0],
+    last: points[points.length - 1],
+    min: Math.min(...values),
+    max: Math.max(...values),
+    count: points.length,
+  };
+}
+
+/**
+ * What the chart says to a screen reader.
+ *
+ * It used to say "values are listed in the table view", which was not true --
+ * the table carried one current number per bucket and none of the history the
+ * chart draws. Rather than pointing somewhere else, the description now carries
+ * the numbers itself: for a trend line the informative content is where it
+ * starts, where it ends, and its range, and reading out several hundred
+ * downsampled points would be worse than useless.
+ */
+function describeSeries(label, points, isCurrent) {
+  const stats = seriesStats(points);
+  if (!stats) return `${label}: no samples in the selected window.`;
+  const latest = isCurrent ? "now" : "last recorded";
+  return (
+    `${label}: ${latest} ${pct(stats.last.v)}, ranging ${pct(stats.min)} to ${pct(stats.max)} ` +
+    `across ${stats.count} samples from ${formatClock(new Date(stats.first.t).toISOString())} ` +
+    `to ${formatClock(new Date(stats.last.t).toISOString())}. ` +
+    `The table view lists these figures per bucket.`
+  );
+}
+
 function renderChart(series, windowStart, windowEnd, currency = {}) {
   const { isCurrent = false, note = "" } = currency;
   const points = (series.points || [])
@@ -273,7 +309,7 @@ function renderChart(series, windowStart, windowEnd, currency = {}) {
   const svg = el("svg", {
     viewBox: `0 0 ${CHART.w} ${CHART.h}`,
     role: "img",
-    "aria-label": `${series.label}: utilization over the selected window. Values are listed in the table view.`,
+    "aria-label": describeSeries(series.label, points, isCurrent),
   });
 
   svg.appendChild(
@@ -615,6 +651,19 @@ async function refresh({ history = true } = {}) {
     // clock, so they keep ageing while the outage lasts.
     if (state.now && !state.now.stale) state.now = { ...state.now, stale: true };
     if (state.history) renderCharts(state.history);
+    // The hero too, and it is the most important of the three: a cap time is the
+    // one thing on this page a reader would act on, and the backend deliberately
+    // withholds projections from stale readings -- so leaving the last one up
+    // during an outage contradicts the server's own judgement and does it in the
+    // most consequential place. Marking state.now stale was not enough on its
+    // own, because nothing re-rendered here.
+    renderHero(
+      {
+        status: "unavailable",
+        message: "The dashboard cannot reach its backend, so the current pace is unknown.",
+      },
+      state.buckets.find((b) => b.key === "seven_day"),
+    );
   } finally {
     delete els.page.dataset.refreshing;
   }
@@ -639,6 +688,42 @@ async function refreshHistory() {
  * state.now.stale stayed false and nothing re-evaluated the labels while the data
  * aged. Third route into the same defect, after the gauges and the stale
  * snapshot. */
+/**
+ * The accessible counterpart to the charts, carrying the same figures their
+ * descriptions quote. Summary statistics rather than every point: the history is
+ * up to 720 samples per bucket per refresh, and a table of that is not a fallback
+ * anyone can read.
+ */
+function renderHistoryTable(series, isCurrentFor) {
+  const rows = [];
+  for (const s of series) {
+    const points = (s.points || [])
+      .map((p) => ({ t: new Date(p.ts).getTime(), v: Number(p.utilization) }))
+      .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.v))
+      .sort((a, b) => a.t - b.t);
+    const stats = seriesStats(points);
+    if (!stats) continue;
+    const latest = isCurrentFor(s.key)
+      ? pct(stats.last.v)
+      : `${pct(stats.last.v)} (${formatAge((Date.now() - stats.last.t) / 1000)})`;
+    rows.push(
+      el("tr", {}, [
+        el("td", { text: s.label || s.key }),
+        el("td", {
+          text: `${formatClock(new Date(stats.first.t).toISOString())} – ${formatClock(
+            new Date(stats.last.t).toISOString(),
+          )}`,
+        }),
+        el("td", { text: latest }),
+        el("td", { text: pct(stats.min) }),
+        el("td", { text: pct(stats.max) }),
+        el("td", { text: String(stats.count) }),
+      ]),
+    );
+  }
+  els.historyBody.replaceChildren(...rows);
+}
+
 function renderCharts(data) {
   const end = Date.now();
   const start = end - state.hours * 3600 * 1000;
@@ -680,6 +765,8 @@ function renderCharts(data) {
           ]),
         ]),
   );
+
+  renderHistoryTable(series, (key) => snapshotIsCurrent && current.has(key));
 }
 
 els.range.addEventListener("click", (event) => {

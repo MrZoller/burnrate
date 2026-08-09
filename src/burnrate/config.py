@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import math
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TextIO
 
 DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "burnrate" / "burnrate.db"
 DEFAULT_HOST = "0.0.0.0"  # noqa: S104 - LAN/Tailscale exposure is the point
@@ -60,6 +62,25 @@ class Config:
         )
 
 
+def print_effective(stream: TextIO | None = None) -> None:
+    """Print the settings this process would actually use, one per line.
+
+    `deploy/install.sh` reads this to bake the plist and to build its readiness
+    URL. It exists so there is one implementation of the validation rules instead
+    of a second copy in shell: the installer used to keep whatever was in the
+    environment, so a BURNRATE_PORT of "abc" went into the plist and into the probe
+    URL while `from_env` quietly rejected it and the agent listened on 8377.
+
+    Order is the contract -- host, port, interval -- and is pinned by a test,
+    because a silent reordering here would misconfigure the agent rather than fail.
+    """
+    config = Config.from_env()
+    out = stream if stream is not None else sys.stdout
+    print(config.host, file=out)
+    print(config.port, file=out)
+    print(config.poll_interval, file=out)
+
+
 def _int_env(name: str, default: int, lo: int, hi: int) -> int:
     """An int from the environment, or the default if it is unusable."""
     try:
@@ -92,3 +113,7 @@ def _positive_float_env(name: str, default: float, maximum: float) -> float:
     if not math.isfinite(value) or value <= 0 or value > maximum:
         return default
     return value
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised via subprocess
+    print_effective()
