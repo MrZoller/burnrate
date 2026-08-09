@@ -164,7 +164,7 @@ def _short_body(response: httpx.Response, secret: str = "", limit: int = ERROR_B
     for exactly that reason; nothing takes `response.text` directly.
     """
     try:
-        excerpt = response.text[:limit].replace("\n", " ").strip()
+        scrubbed = scrub(response.text, secret)
     except Exception:  # pragma: no cover - defensive
         return ""
-    return scrub(excerpt, secret)
+    return scrubbed[:limit].replace("\n", " ").strip()
