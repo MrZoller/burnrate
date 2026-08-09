@@ -347,8 +347,52 @@ body {
   background: currentColor;
 }
 
-.gauge__countdown {
+/* Time-elapsed bar: window start at the left, reset at the right, marker at the
+   reading. Deliberately not pace-coloured -- the gauge arc already carries the
+   verdict's colour, and this is a neutral how-far-through-the-window reference. */
+.gauge__bar {
+  position: relative;
+  width: 100%;
+  max-width: 168px;
+  height: 4px;
+  margin-top: 2px;
+  border-radius: 3px;
+  background: var(--grid);
+}
+
+.gauge__bar-elapsed {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 3px;
+  background: var(--axis);
+}
+
+.gauge__bar-marker {
+  position: absolute;
+  top: -3px;
+  width: 2px;
+  height: 10px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--ink-secondary);
+}
+
+/* A stale reading's marker is honest about its age by not moving; mute it too, so it
+   does not read as a live position. */
+.gauge__bar--stale .gauge__bar-marker {
+  background: var(--ink-muted);
+}
+
+/* The window line is primary; the live countdown below it is secondary. */
+.gauge__window {
   font-size: 12px;
+  color: var(--ink-secondary);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.gauge__countdown {
+  font-size: 11px;
   color: var(--ink-muted);
   font-variant-numeric: tabular-nums;
 }

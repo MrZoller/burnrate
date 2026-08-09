@@ -9,8 +9,13 @@ from burnrate.projection import (
     CLEARS_RESET,
     IDLE,
     INSUFFICIENT_DATA,
+    ON_PACE,
+    ON_PACE_TO_CAP,
     PROJECTED,
+    TOO_EARLY,
     UNAVAILABLE,
+    UNKNOWN_PACE,
+    pace_for,
     project,
 )
 from burnrate.usage import Bucket
@@ -302,3 +307,165 @@ def test_faster_burn_always_hits_the_cap_sooner():
 
     assert fast.hits_cap_at < slow.hits_cap_at
     assert fast.rate_per_hour > slow.rate_per_hour
+
+
+# ------------------------------------------------------------------ pace verdicts
+
+
+def at_window_age(utilization, elapsed_hours, *, period_hours=168.0, key="seven_day", known=True):
+    """A bucket whose window opened `elapsed_hours` before NOW, read at NOW."""
+    resets_at = NOW + timedelta(hours=period_hours - elapsed_hours)
+    bucket = Bucket(
+        key=key,
+        label="Weekly (all models)",
+        utilization=utilization,
+        resets_at=resets_at,
+        known=known,
+    )
+    return pace_for(bucket, now=NOW, reading_at=NOW)
+
+
+def test_34_percent_at_23_hours_is_on_pace_to_cap():
+    """The issue's worked example: burned well ahead of the clock, projected to cap
+    44h out -- inside the ~145h left in the window."""
+    pace = at_window_age(34.0, 23.0)
+
+    assert pace.status == ON_PACE_TO_CAP
+    assert pace.label == "On pace to cap"
+
+
+def test_34_percent_at_5_days_is_on_pace():
+    """Same 34% burned, but five days into the window: below the elapsed line, so
+    the same number now reads as comfortably on pace."""
+    pace = at_window_age(34.0, 5 * 24.0)
+
+    assert pace.status == ON_PACE
+    assert pace.label == "On pace"
+
+
+def test_below_the_elapsed_line_is_on_pace_even_when_projection_clears():
+    pace = at_window_age(10.0, 5 * 24.0)
+
+    assert pace.status == ON_PACE
+
+
+def test_an_unrecognized_bucket_never_gets_a_colour_coded_verdict():
+    pace = at_window_age(80.0, 5 * 24.0, known=False)
+
+    assert pace.status == UNKNOWN_PACE
+    assert pace.label == "Unknown"
+
+
+def test_a_bucket_younger_than_the_projection_floor_is_too_early():
+    pace = at_window_age(3.0, 0.25)
+
+    assert pace.status == TOO_EARLY
+    assert pace.label == "Too early to tell"
+
+
+def test_a_young_idle_window_is_too_early_not_on_pace():
+    """Consistency: a still-idle window younger than the floor must read the same
+    neutral "Too early" as the same-age window with any usage. project() returns IDLE
+    before its floor, so without the guard 0% would clear the diagonal as green while
+    3% at the identical age stayed neutral -- a verdict decided by 0%-vs-3%, not age."""
+    pace = at_window_age(0.0, 0.25)
+
+    assert pace.status == TOO_EARLY
+    assert pace.label == "Too early to tell"
+
+
+def test_a_bucket_with_no_reset_has_no_window_and_is_unknown():
+    """No reset means no derivable window, so there is nothing to be early *about*:
+    the verdict is "Unknown", not "Too early to tell". "Too early" is reserved for a
+    window that exists but has not aged enough to project."""
+    bucket = Bucket(key="seven_day", label="Weekly", utilization=40.0, resets_at=None)
+
+    pace = pace_for(bucket, now=NOW, reading_at=NOW)
+
+    assert pace.window_opened_at is None
+    assert pace.elapsed_fraction is None
+    assert pace.status == UNKNOWN_PACE
+    assert pace.label == "Unknown"
+
+
+def test_a_bucket_whose_reset_has_already_passed_is_unknown():
+    """The reviewer's strongest case: a passed reset has no live window, so the gauge
+    must not say "Too early to tell" while the hero says "unavailable" and the
+    countdown says "Resetting...". All three now agree on Unknown/unavailable."""
+    resets_at = NOW - timedelta(hours=1)
+    bucket = Bucket(key="seven_day", label="Weekly", utilization=40.0, resets_at=resets_at)
+
+    pace = pace_for(bucket, now=NOW, reading_at=NOW)
+
+    assert pace.status == UNKNOWN_PACE
+    assert pace.label == "Unknown"
+
+
+def test_window_opened_at_is_one_period_before_the_reset():
+    weekly_pace = at_window_age(34.0, 23.0, period_hours=168.0, key="seven_day")
+    session_pace = at_window_age(34.0, 3.0, period_hours=5.0, key="five_hour")
+
+    assert weekly_pace.resets_at - weekly_pace.window_opened_at == WEEK
+    assert session_pace.resets_at - session_pace.window_opened_at == timedelta(hours=5)
+
+
+def test_elapsed_fraction_tracks_the_reading_not_the_wall_clock():
+    """Item 2's honesty rule: the bar's marker anchors to when the reading was taken.
+    A reading two days stale still reports the fraction it had when it was fresh,
+    rather than sliding toward the reset over data nobody collected."""
+    reading_at = NOW
+    resets_at = reading_at + timedelta(hours=168.0 - 23.0)
+    bucket = Bucket(key="seven_day", label="Weekly", utilization=34.0, resets_at=resets_at)
+
+    fresh = pace_for(bucket, now=reading_at, reading_at=reading_at)
+    # Requested two days later; the window is still open, but the reading has not moved.
+    aged = pace_for(bucket, now=reading_at + timedelta(days=2), reading_at=reading_at)
+
+    assert fresh.elapsed_fraction == pytest.approx(23.0 / 168.0)
+    assert aged.elapsed_fraction == pytest.approx(fresh.elapsed_fraction)
+
+
+@pytest.mark.parametrize(
+    ("utilization", "elapsed_hours", "expected"),
+    [
+        # Above the diagonal (burn% > elapsed%): projected to cross the cap first.
+        (50.0, 60.0, ON_PACE_TO_CAP),
+        (34.0, 23.0, ON_PACE_TO_CAP),
+        # Exactly on the diagonal (burn% == elapsed%): the `<=` boundary is green.
+        (50.0, 84.0, ON_PACE),
+        # Below the diagonal (burn% < elapsed%): comfortably on pace.
+        (50.0, 100.0, ON_PACE),
+        (34.0, 120.0, ON_PACE),
+    ],
+)
+def test_the_verdict_boundary_is_the_diagonal(utilization, elapsed_hours, expected):
+    """Two visible tiers, split by the burn%-vs-elapsed% diagonal: on/below it is
+    green `on_pace`, above it is red `on_pace_to_cap`.
+
+    The issue's middle tier -- amber `ahead_of_pace` (burn% > elapsed% yet the
+    projection still clears the reset) -- is provably unreachable under pure linear
+    projection: burn% > elapsed% is equivalent to the pace crossing 100% before the
+    reset, so there is no gap for amber to occupy. It stays in `_classify_pace` as a
+    faithful, defensive rendering of the issue's tree; a follow-up issue will define a
+    real amber threshold. This test pins the two tiers that actually render so the
+    boundary cannot drift unnoticed.
+    """
+    assert at_window_age(utilization, elapsed_hours).status == expected
+
+
+def test_pace_reuses_the_projection_states():
+    """The verdict and the hero projection agree, since one is built from the other."""
+    idle = at_window_age(0.0, 5 * 24.0)
+    at_cap = at_window_age(100.0, 23.0)
+
+    assert idle.status == ON_PACE
+    assert project(
+        Bucket("seven_day", "Weekly", 0.0, NOW + timedelta(hours=168 - 120)), now=NOW
+    ).status in {IDLE, CLEARS_RESET}
+    assert at_cap.status == ON_PACE_TO_CAP
+    assert (
+        project(
+            Bucket("seven_day", "Weekly", 100.0, NOW + timedelta(hours=168 - 23)), now=NOW
+        ).status
+        == AT_CAP
+    )

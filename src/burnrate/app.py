@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import Config
 from .poller import Poller
-from .projection import Projection, project
+from .projection import Pace, Projection, pace_for, project
 from .store import MAX_POINTS_PER_BUCKET, Sample, Store
 from .usage import KNOWN_LABELS, Bucket, UsageSnapshot, group_for, humanize
 
@@ -84,7 +84,9 @@ def create_app(config: Config | None = None) -> FastAPI:
                 "staleness_seconds": staleness,
                 "stale_after_seconds": stale_after,
                 "poll_interval_seconds": config.poll_interval,
-                "buckets": [_bucket_json(b) for b in buckets],
+                "buckets": [
+                    _bucket_json(b, pace_for(b, now=moment, reading_at=reading_at)) for b in buckets
+                ],
                 "projection": _projection_json(
                     project(weekly, now=moment, reading_at=reading_at, stale=stale)
                 ),
@@ -152,7 +154,7 @@ def _sample_to_bucket(sample: Sample) -> Bucket:
     )
 
 
-def _bucket_json(bucket: Bucket) -> dict[str, Any]:
+def _bucket_json(bucket: Bucket, pace: Pace) -> dict[str, Any]:
     return {
         "key": bucket.key,
         "label": bucket.label,
@@ -162,6 +164,16 @@ def _bucket_json(bucket: Bucket) -> dict[str, Any]:
         "severity": bucket.severity,
         "known": bucket.known,
         "source": bucket.source,
+        # Item 1: the window's start, surfaced rather than re-derived in JS. Present
+        # only for recognized buckets -- inferring a start needs an assumed period
+        # length, which an unrecognized bucket does not have -- so those keep the
+        # "No reset reported" line.
+        "window_opened_at": _iso(pace.window_opened_at),
+        # Item 5: pace, not level. Item 2's bar reads `elapsed_fraction` (measured at
+        # the reading time, so the marker ages honestly).
+        "pace_status": pace.status,
+        "pace_label": pace.label,
+        "elapsed_fraction": pace.elapsed_fraction,
     }
 
 

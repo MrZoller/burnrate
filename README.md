@@ -146,8 +146,8 @@ It reports one of:
 
 | Reading | Meaning |
 |---|---|
-| **Cap at \<time\>** | The line crosses 100% before the reset. This is the one to act on. |
-| **Clears the reset** | The projection lands past `resets_at` — the week resets before you run out. |
+| **On pace to hit the cap \<time\>** | At the current pace the line crosses 100% before the reset. This is the one to act on. |
+| **On pace to clear the reset** | The projection lands past `resets_at` — the week resets before you run out. |
 | **Too early to project** | Less than 30 minutes since the reset. |
 | **No usage yet** | Zero utilization this period. |
 | **Weekly cap reached** | Already at 100%. |
@@ -163,9 +163,20 @@ out midweek?" and not for anything more precise.
 
 ### The gauges
 
-One radial gauge per bucket, colored by threshold — green under 70%, amber
-70–89%, red at 90%+ — each with a written state label beside it so the color is
-never the only signal. Below each, a live countdown to that bucket's reset.
+One radial gauge per bucket, colored by **pace** rather than raw level: how far
+you have burned measured against how far into the window you are. Burning no
+faster than the clock reads green (**On pace**); a pace projected to reach the cap
+before the window resets reads red (**On pace to cap**). A window too new to judge,
+or an unrecognized bucket, stays neutral (**Too early to tell** / **Unknown**) —
+never a color-coded verdict. Each gauge pairs the color with the written pace
+word, so the color is never the only signal. (An amber **Ahead of pace** tier also
+exists in the code but is an unreachable boundary case under the current linear
+projection — a real threshold for it is a planned follow-up.)
+
+Under each gauge is a thin time-elapsed bar — window start at the left, reset at
+the right, a marker at the reading — so percent-of-time-elapsed reads directly
+against percent-burned. Below that, the window's span (open → reset) and a live
+countdown to the reset.
 
 ### The charts
 
