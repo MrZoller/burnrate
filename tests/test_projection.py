@@ -363,6 +363,17 @@ def test_a_bucket_younger_than_the_projection_floor_is_too_early():
     assert pace.label == "Too early to tell"
 
 
+def test_a_young_idle_window_is_too_early_not_on_pace():
+    """Consistency: a still-idle window younger than the floor must read the same
+    neutral "Too early" as the same-age window with any usage. project() returns IDLE
+    before its floor, so without the guard 0% would clear the diagonal as green while
+    3% at the identical age stayed neutral -- a verdict decided by 0%-vs-3%, not age."""
+    pace = at_window_age(0.0, 0.25)
+
+    assert pace.status == TOO_EARLY
+    assert pace.label == "Too early to tell"
+
+
 def test_a_bucket_with_no_reset_has_no_window_and_is_unknown():
     """No reset means no derivable window, so there is nothing to be early *about*:
     the verdict is "Unknown", not "Too early to tell". "Too early" is reserved for a

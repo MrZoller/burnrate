@@ -309,6 +309,14 @@ def _classify_pace(projection: Projection, bucket: Bucket, elapsed_fraction: flo
         # A window we have, but too little elapsed time for the rate to mean anything.
         # Neutral, never a colour-coded verdict on data that cannot support one.
         return TOO_EARLY
+    # A still-idle window younger than the floor is also too early to judge. project()
+    # returns IDLE before applying its MIN_WINDOW floor (so the hero can say "no usage
+    # yet" rather than "too early"), so a fresh idle bucket arrives here with a real
+    # elapsed_fraction and would clear the diagonal (0.0 <= anything) as green -- while
+    # the same-age window with 3% usage takes the INSUFFICIENT_DATA path to neutral.
+    # Mirror that floor here so age, not 0%-vs-3%, decides the verdict.
+    if status == IDLE and (projection.elapsed_hours or 0.0) < MIN_WINDOW_HOURS:
+        return TOO_EARLY
     if bucket.utilization / 100.0 <= elapsed_fraction:
         return ON_PACE
     if status == CLEARS_RESET:
