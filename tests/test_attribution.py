@@ -83,7 +83,8 @@ def test_valid_fixture_extracts_only_assistant_turns():
     assert [t.model for t in turns] == ["claude-opus-4-8", "claude-sonnet-5"]
     assert [t.is_sidechain for t in turns] == [False, True]
     assert turns[0].total_tokens == 100 + 50 + 10 + 200000
-    assert turns[0].context_tokens == 100 + 200000
+    # context = input + cache_read + cache_creation (a priming turn is large-context).
+    assert turns[0].context_tokens == 100 + 200000 + 10
 
 
 def test_malformed_lines_are_skipped_and_counted():
@@ -330,22 +331,30 @@ def test_appended_turns_extend_an_existing_session(tmp_path):
     assert span == pytest.approx(1.0, abs=0.01)
 
 
-def test_turns_older_than_retention_are_not_stored(tmp_path):
+def test_retention_cutoff_bounds_hourly_but_not_sessions(tmp_path):
+    """The 30-day cutoff gates the HOURLY fold only (Codex #4). An old turn still forms
+    its session -- so the "lifetime" label stays honest -- but adds nothing to any
+    hourly window."""
     now = datetime.now(UTC)
     root = _tree(
         tmp_path / "projects",
         {
             "a.jsonl": [
-                _assistant(session="old", ts=now - timedelta(days=45)),
-                _assistant(session="fresh", ts=now),
+                _assistant(
+                    session="old", ts=now - timedelta(days=45), input_tokens=1000, output_tokens=0
+                ),
+                _assistant(session="fresh", ts=now, input_tokens=15, output_tokens=0),
             ],
         },
     )
     store = Store(tmp_path / "b.db")
     store.aggregate_jsonl(root, retention_days=30)
 
-    sessions = {s["session_id"] for s in store.attribution_sessions(90 * 24)}
-    assert sessions == {"fresh"}
+    sessions = {s["session_id"] for s in store.attribution_sessions(90 * 24, now=now)}
+    assert sessions == {"old", "fresh"}  # the old session is kept whole, not dropped
+    # ...but the old turn contributes nothing to the hourly rollup.
+    hourly_total = sum(t for _, t in store.attribution_totals(90 * 24, now=now)["by_project"])
+    assert hourly_total == 15
 
 
 # --------------------------------------------------------------- endpoint
@@ -520,3 +529,172 @@ def test_attribution_endpoint_never_leaks_a_credential(attribution_client):
         raw = client.get("/api/attribution?window=7d").text
 
     assert "sk-ant" not in raw
+
+
+def test_same_basename_projects_are_disambiguated(attribution_client):
+    """Codex #6: /clients/a/app and /clients/b/app must not both render as "app" and
+    each claim a top-N slot. Colliding basenames grow a parent segment."""
+    now = datetime.now(UTC)
+    client = attribution_client(
+        {
+            "a.jsonl": [_assistant(cwd="/clients/a/app", session="a", ts=now, input_tokens=100)],
+            "b.jsonl": [_assistant(cwd="/clients/b/app", session="b", ts=now, input_tokens=50)],
+        }
+    )
+    with client:
+        body = client.get("/api/attribution?window=7d").json()
+
+    labels = {row["label"] for row in body["by_project"]}
+    assert labels == {"a/app", "b/app"}
+
+
+# ------------------------------------------------- Codex review regressions
+
+
+def _assistant_no_session(cwd: str, ts: datetime, tokens: int = 15) -> str:
+    """An assistant record that omits sessionId entirely."""
+    return json.dumps(
+        {
+            "type": "assistant",
+            "cwd": cwd,
+            "timestamp": ts.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+            "message": {
+                "model": "claude-opus-4-8",
+                "usage": {"input_tokens": tokens, "output_tokens": 0},
+            },
+        }
+    )
+
+
+def test_context_tokens_includes_cache_creation():
+    """Codex #1: a cache-priming turn (small input, no cache read, huge cache creation)
+    is a large-context turn; context must count cache_creation."""
+    turn = turn_from_record(
+        json.loads(
+            _assistant(input_tokens=5, output_tokens=1, cache_creation=200_000, cache_read=3)
+        )
+    )
+    assert turn is not None
+    assert turn.context_tokens == 5 + 3 + 200_000
+
+
+def test_a_cache_priming_turn_counts_toward_large_context(tmp_path):
+    """Codex #1, end to end: a priming turn's tokens land in large_context_tokens."""
+    now = datetime.now(UTC)
+    root = _tree(
+        tmp_path / "projects",
+        {
+            "a.jsonl": [
+                _assistant(
+                    ts=now,
+                    input_tokens=5,
+                    output_tokens=1,
+                    cache_creation=LARGE_CONTEXT_TOKENS,
+                    cache_read=0,
+                )
+            ]
+        },
+    )
+    store = Store(tmp_path / "b.db")
+    store.aggregate_jsonl(root)
+
+    totals = store.attribution_totals(168, now=now)
+    assert totals["large_context_tokens"] == 5 + 1 + LARGE_CONTEXT_TOKENS
+
+
+def test_missing_session_id_does_not_merge_across_files(tmp_path):
+    """Codex #3: sessionId-less turns get a per-file identity, so two different files'
+    unknowns stay two sessions rather than collapsing into one fabricated one."""
+    now = datetime.now(UTC)
+    projects = tmp_path / "projects"
+    (projects / "projA").mkdir(parents=True)
+    (projects / "projB").mkdir(parents=True)
+    (projects / "projA" / "a.jsonl").write_text(_assistant_no_session("/work/a", now) + "\n")
+    (projects / "projB" / "b.jsonl").write_text(_assistant_no_session("/work/b", now) + "\n")
+    store = Store(tmp_path / "b.db")
+    store.aggregate_jsonl(projects)
+
+    ids = sorted(s["session_id"] for s in store.attribution_sessions(168, now=now))
+    assert len(ids) == 2
+    assert ids[0] != ids[1]
+    assert all(i.startswith("unknown:") for i in ids)
+
+
+def test_session_lifetime_survives_the_retention_cutoff(tmp_path):
+    """Codex #4: a session spanning >30 days reports its full lifetime span and total,
+    while the hourly rollup stays bounded to the retention window."""
+    now = datetime.now(UTC)
+    root = _tree(
+        tmp_path / "projects",
+        {
+            "a.jsonl": [
+                _assistant(
+                    session="s1", ts=now - timedelta(days=40), input_tokens=1000, output_tokens=0
+                ),
+                _assistant(
+                    session="s1", ts=now - timedelta(hours=1), input_tokens=15, output_tokens=0
+                ),
+            ],
+        },
+    )
+    store = Store(tmp_path / "b.db")
+    store.aggregate_jsonl(root, retention_days=30)
+
+    sessions = store.attribution_sessions(90 * 24, now=now)
+    assert len(sessions) == 1
+    span_days = (sessions[0]["end_ts"] - sessions[0]["start_ts"]).total_seconds() / 86400
+    assert span_days == pytest.approx(40, abs=0.1)
+    assert sessions[0]["total_tokens"] == 1015  # lifetime: the 40-day-old turn included
+    # Hourly stays bounded: the 40-day-old turn is past retention, so it is not folded
+    # into any hourly window.
+    hourly_total = sum(t for _, t in store.attribution_totals(90 * 24, now=now)["by_project"])
+    assert hourly_total == 15
+
+
+def test_totals_cutoff_is_floored_to_the_hour(tmp_path):
+    """Codex #7: hour_start is hour-floored, so the cutoff must be too, or the oldest
+    boundary hour is dropped and up to ~59 min of in-window usage is lost."""
+    now = datetime.now(UTC).replace(minute=30, second=0, microsecond=0)
+    # A turn 15 minutes into the boundary hour of a 24h window: its hour bucket equals
+    # the floored cutoff (included), but sits before the un-floored :30 cutoff (dropped).
+    boundary_ts = (now - timedelta(hours=24)).replace(minute=15)
+    root = _tree(
+        tmp_path / "projects",
+        {"a.jsonl": [_assistant(ts=boundary_ts, input_tokens=42, output_tokens=0)]},
+    )
+    store = Store(tmp_path / "b.db")
+    store.aggregate_jsonl(root)
+
+    total = sum(t for _, t in store.attribution_totals(24, now=now)["by_project"])
+    assert total == 42
+
+
+def test_read_new_lines_drains_a_file_larger_than_the_cap(tmp_path):
+    """Codex #8: a per-pass read cap must still deliver every line exactly once across
+    successive calls, with the offset advancing correctly."""
+    path = tmp_path / "big.jsonl"
+    records = [json.dumps({"n": i}) for i in range(40)]
+    path.write_text("\n".join(records) + "\n")
+
+    collected: list[str] = []
+    offset = 0
+    for _ in range(500):  # bounded so a stall fails rather than hangs
+        lines, offset = read_new_lines(path, offset, max_bytes=32)  # tiny cap forces many passes
+        if not lines:
+            break
+        collected.extend(lines)
+
+    assert collected == records  # every line, in order, none dropped or duplicated
+    assert offset == path.stat().st_size
+
+
+def test_read_new_lines_reads_a_single_line_longer_than_the_cap(tmp_path):
+    """A line larger than the cap must still be read whole, or the drain would stall."""
+    path = tmp_path / "one.jsonl"
+    line = json.dumps({"x": "y" * 500})
+    path.write_text(line + "\n")
+
+    lines, offset = read_new_lines(path, 0, max_bytes=16)
+
+    assert lines == [line]
+    assert offset == path.stat().st_size

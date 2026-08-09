@@ -68,6 +68,16 @@ def test_a_tilde_in_the_projects_dir_is_expanded(monkeypatch):
     assert attribution_dir == Path.home() / "somewhere" / "projects"
 
 
+@pytest.mark.parametrize("raw", ["rel/projects", "projects", "./p"])
+def test_a_relative_projects_dir_is_made_absolute(monkeypatch, raw):
+    """Same reason `BURNRATE_DB` is absolutized: a relative projects dir would resolve
+    against launchd's WorkingDirectory under the agent but against the shell's cwd in a
+    foreground run, naming two different trees for one configuration."""
+    monkeypatch.setenv("BURNRATE_PROJECTS_DIR", raw)
+
+    assert Config.from_env().attribution_dir.is_absolute()
+
+
 def test_a_tilde_in_the_db_path_is_expanded(monkeypatch):
     monkeypatch.setenv("BURNRATE_DB", "~/somewhere/burnrate.db")
 

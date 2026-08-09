@@ -233,8 +233,11 @@ def _attribution_payload(store: Store, window: str) -> dict[str, Any]:
         window = _DEFAULT_WINDOW
     hours = _ATTRIBUTION_WINDOWS[window]
 
-    totals = store.attribution_totals(hours)
-    sessions = store.attribution_sessions(hours)
+    # One reading of the clock for both queries, so the by-project/model window and the
+    # active-sessions window share an edge instead of drifting by the call latency.
+    now = datetime.now(UTC)
+    totals = store.attribution_totals(hours, now=now)
+    sessions = store.attribution_sessions(hours, now=now)
 
     hourly_total = sum(tokens for _, tokens in totals["by_project"])
     by_agent = totals["by_agent"]
@@ -244,15 +247,22 @@ def _attribution_payload(store: Store, window: str) -> dict[str, Any]:
     # subset of in-window tokens from turns that were themselves at large context.
     large_context_tokens = totals["large_context_tokens"]
 
+    # Readable project labels, disambiguated only where two working directories share a
+    # basename (/clients/a/app and /clients/b/app -> "a/app", "b/app"). Built from every
+    # path in play so the by-project rows and the session list use the same labels.
+    display = _project_display_names(
+        [name for name, _ in totals["by_project"]] + [s["project"] for s in sessions]
+    )
+
     return {
-        "generated_at": datetime.now(UTC).isoformat(),
+        "generated_at": now.isoformat(),
         "window": window,
         "hours": hours,
         "scope": ATTRIBUTION_SCOPE,
         "total_tokens": hourly_total,
         "token_breakdown": totals["breakdown"],
         "by_project": _shared_rows(
-            [(_project_name(name), tokens) for name, tokens in totals["by_project"]],
+            [(display[name], tokens) for name, tokens in totals["by_project"]],
             hourly_total,
         ),
         "by_model": _shared_rows(totals["by_model"], hourly_total),
@@ -271,7 +281,7 @@ def _attribution_payload(store: Store, window: str) -> dict[str, Any]:
         # windowed percentage is reported for them.
         "top_sessions": [
             {
-                "project": _project_name(s["project"]),
+                "project": display[s["project"]],
                 "model": s["model"],
                 "duration_hours": round(_session_hours(s), 2),
                 "lifetime_tokens": s["total_tokens"],
@@ -304,11 +314,43 @@ def _session_hours(session: dict[str, Any]) -> float:
     return max(0.0, (end - start).total_seconds() / 3600.0)
 
 
-def _project_name(path: str) -> str:
-    """The readable basename of a working directory, never the full path."""
+def _project_segments(path: str) -> list[str]:
+    """A working directory's meaningful path segments (drops the root and blanks)."""
     if not path or path == "unknown":
-        return "unknown"
-    return Path(path).name or path
+        return ["unknown"]
+    return [seg for seg in Path(path).parts if seg not in ("", "/")] or [path]
+
+
+def _project_display_names(paths: list[str]) -> dict[str, str]:
+    """Map each distinct working directory to a readable, unambiguous label.
+
+    The privacy-lean default is the basename alone. Two directories that share a
+    basename (/clients/a/app and /clients/b/app) would otherwise render identically
+    and each claim a top-N slot, so colliding labels grow one parent segment at a
+    time -- and only those; a directory with a unique basename keeps just its
+    basename. Termination is guaranteed because distinct paths differ within their
+    full segment lists.
+    """
+    segments = {p: _project_segments(p) for p in set(paths)}
+    depth = dict.fromkeys(segments, 1)
+
+    def label(p: str) -> str:
+        return "/".join(segments[p][-depth[p] :])
+
+    while True:
+        collisions = False
+        by_label: dict[str, list[str]] = {}
+        for p in segments:
+            by_label.setdefault(label(p), []).append(p)
+        for members in by_label.values():
+            if len(members) < 2:
+                continue
+            for p in members:
+                if depth[p] < len(segments[p]):
+                    depth[p] += 1
+                    collisions = True
+        if not collisions:
+            return {p: label(p) for p in segments}
 
 
 def _to_series(samples: list[Sample]) -> list[dict[str, Any]]:

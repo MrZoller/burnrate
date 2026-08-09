@@ -374,10 +374,15 @@ class Store:
         Incremental and exactly-once: each file is read only past its stored offset,
         and the offsets advance in the same transaction as the sums they produced, so
         a crash mid-pass commits nothing and the next pass simply re-reads the same
-        bytes. Turns older than the retention window are counted but not stored, which
-        both matches what ``prune`` would drop and keeps the first pass over a
-        months-deep tree from accumulating hours nobody queries. Never re-reads a file
-        that has not grown.
+        bytes. A file is drained in bounded chunks (see ``read_new_lines``) so a huge
+        one never loads whole into memory.
+
+        The retention cutoff is applied to the HOURLY fold ONLY. Sessions are folded
+        regardless of a turn's age, because a still-active long session's early turns
+        belong in its lifetime span and total -- gating those out truncated the very
+        number the "longest sessions" panel labels as lifetime. The sessions dict is
+        bounded by session count, not by time, and ``prune`` drops fully-inactive
+        sessions by ``end_ts`` anyway. Never re-reads a file that has not grown.
         """
         min_ts = datetime.now(UTC) - timedelta(days=retention_days)
         watermarks = self._load_watermarks()
@@ -391,24 +396,39 @@ class Store:
             stats.files_scanned += 1
             key = str(path)
             offset = watermarks.get(key, 0)
-            lines, new_offset = attribution.read_new_lines(path, offset)
-            if not lines:
+            # A per-file identity for turns that carry no sessionId, so they do not all
+            # collapse into one fabricated cross-file "unknown" session with a combined
+            # project, summed tokens, and a span that floats to the top of the panel.
+            session_fallback = _session_fallback(root, path)
+
+            saw_new = False
+            pass_stats = ParseStats()
+            # Drain this file in bounded chunks; each read_new_lines returns whole lines
+            # and advances the offset, and returns none once only a partial line remains.
+            while True:
+                lines, new_offset = attribution.read_new_lines(path, offset)
+                if not lines:
+                    break
+                saw_new = True
+                for turn in attribution.parse_lines(lines, pass_stats):
+                    session_id = turn.session_id
+                    if session_id == attribution.UNKNOWN:
+                        session_id = session_fallback
+                    _fold_turn(hourly, sessions, turn, session_id, fold_hourly=turn.ts >= min_ts)
+                offset = new_offset
+
+            if not saw_new:
                 continue
             stats.files_with_new_data += 1
-
-            pass_stats = ParseStats()
-            for turn in attribution.parse_lines(lines, pass_stats):
-                if turn.ts >= min_ts:
-                    _fold_turn(hourly, sessions, turn)
             stats.lines += pass_stats.lines
             stats.malformed += pass_stats.malformed
             stats.emitted += pass_stats.emitted
 
             try:
                 info = path.stat()
-                offsets[key] = (new_offset, info.st_size, info.st_mtime)
+                offsets[key] = (offset, info.st_size, info.st_mtime)
             except OSError:
-                offsets[key] = (new_offset, None, None)
+                offsets[key] = (offset, None, None)
 
         if not offsets:
             return stats
@@ -492,9 +512,17 @@ class Store:
             [(path, off, size, mtime) for path, (off, size, mtime) in offsets.items()],
         )
 
-    def attribution_totals(self, hours: float) -> dict[str, Any]:
-        """Windowed token totals, grouped for the by-project/model/agent panels."""
-        cutoff = _iso(datetime.now(UTC) - timedelta(hours=hours))
+    def attribution_totals(self, hours: float, now: datetime | None = None) -> dict[str, Any]:
+        """Windowed token totals, grouped for the by-project/model/agent panels.
+
+        The cutoff is floored to the hour to match ``hour_start``'s granularity: an
+        un-floored ``now - hours`` keeps minutes, and ``hour_start >= cutoff`` then
+        drops the whole oldest boundary hour, losing up to ~59 minutes of usage that
+        is genuinely inside the window.
+        """
+        now = now or datetime.now(UTC)
+        cutoff_at = (now - timedelta(hours=hours)).replace(minute=0, second=0, microsecond=0)
+        cutoff = _iso(cutoff_at)
         with self._connect() as conn:
             breakdown = conn.execute(
                 "SELECT"
@@ -535,7 +563,9 @@ class Store:
             "by_agent": {int(row["is_sidechain"]): row["tokens"] or 0 for row in by_agent},
         }
 
-    def attribution_sessions(self, hours: float) -> list[dict[str, Any]]:
+    def attribution_sessions(
+        self, hours: float, now: datetime | None = None
+    ) -> list[dict[str, Any]]:
         """Every session active within the window, newest activity first.
 
         Active means it has a turn inside the window (``end_ts`` at or past the
@@ -543,8 +573,13 @@ class Store:
         them only for the descriptive "longest sessions active in this window" list,
         which labels its numbers as lifetime. The windowed large-context share does
         NOT come from here; it comes from hourly_usage.large_context_tokens.
+
+        The cutoff floors to the hour to match ``attribution_totals``, so the two
+        answer for the same window edge.
         """
-        cutoff = _iso(datetime.now(UTC) - timedelta(hours=hours))
+        now = now or datetime.now(UTC)
+        cutoff_at = (now - timedelta(hours=hours)).replace(minute=0, second=0, microsecond=0)
+        cutoff = _iso(cutoff_at)
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT session_id, project, model, start_ts, end_ts, total_tokens,"
@@ -566,27 +601,51 @@ class Store:
         ]
 
 
+def _session_fallback(root: Path | str, path: Path) -> str:
+    """A per-file session identity for turns that carry no sessionId of their own.
+
+    Keyed on the file's path relative to the tree (its own name is a session UUID),
+    so unknown-session turns are attributed to the file they came from rather than
+    merged into one machine-wide "unknown" bucket. Distinct from a real sessionId by
+    the ``unknown:`` prefix.
+    """
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        rel = path
+    return f"unknown:{rel}"
+
+
 def _fold_turn(
     hourly: dict[tuple[str, str, str, int], list[int]],
     sessions: dict[str, _SessionAcc],
     turn: Turn,
+    session_id: str,
+    *,
+    fold_hourly: bool,
 ) -> None:
-    """Accumulate one turn into the in-memory hourly and session rollups."""
-    hour = turn.ts.replace(minute=0, second=0, microsecond=0)
-    key = (_iso(hour) or "", turn.project, turn.model, 1 if turn.is_sidechain else 0)
-    tokens = hourly.setdefault(key, [0, 0, 0, 0, 0])
-    tokens[0] += turn.input_tokens
-    tokens[1] += turn.output_tokens
-    tokens[2] += turn.cache_creation_tokens
-    tokens[3] += turn.cache_read_tokens
-    # The large-context subset: this turn's whole token count counts toward the hour's
-    # large_context_tokens only when the turn itself worked near the top of the window.
-    if turn.context_tokens >= LARGE_CONTEXT_TOKENS:
-        tokens[4] += turn.total_tokens
+    """Accumulate one turn into the in-memory rollups.
 
-    acc = sessions.get(turn.session_id)
+    ``session_id`` is the effective id (the turn's own, or a per-file fallback when it
+    had none). ``fold_hourly`` gates only the hourly rollup: an old turn still extends
+    its session's lifetime span and total but adds nothing to a window nobody queries.
+    """
+    if fold_hourly:
+        hour = turn.ts.replace(minute=0, second=0, microsecond=0)
+        key = (_iso(hour) or "", turn.project, turn.model, 1 if turn.is_sidechain else 0)
+        tokens = hourly.setdefault(key, [0, 0, 0, 0, 0])
+        tokens[0] += turn.input_tokens
+        tokens[1] += turn.output_tokens
+        tokens[2] += turn.cache_creation_tokens
+        tokens[3] += turn.cache_read_tokens
+        # The large-context subset: this turn's whole token count counts toward the
+        # hour's large_context_tokens only when the turn itself was at large context.
+        if turn.context_tokens >= LARGE_CONTEXT_TOKENS:
+            tokens[4] += turn.total_tokens
+
+    acc = sessions.get(session_id)
     if acc is None:
-        sessions[turn.session_id] = _SessionAcc(
+        sessions[session_id] = _SessionAcc(
             project=turn.project,
             model=turn.model,
             start_ts=turn.ts,

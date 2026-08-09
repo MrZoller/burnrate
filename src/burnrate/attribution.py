@@ -37,6 +37,14 @@ SYNTHETIC_MODEL = "<synthetic>"
 # counted somewhere rather than silently lost.
 UNKNOWN = "unknown"
 
+# Most bytes one read_new_lines call pulls into memory at once. A first pass over a
+# multi-hundred-MB transcript would otherwise read the whole file into a single bytes
+# object; capping the read means the aggregation drains such a file in bounded chunks
+# instead. Only whole newline-terminated lines within the chunk are returned, so the
+# remainder is picked up by the next call. A single line longer than the cap is still
+# read whole (see the loop below) -- the cap bounds the common case, not one giant line.
+MAX_READ_BYTES = 8 * 1024 * 1024
+
 
 @dataclass(frozen=True)
 class Turn:
@@ -64,8 +72,12 @@ class Turn:
 
     @property
     def context_tokens(self) -> int:
-        """How much context this turn carried: fresh input plus what was read from cache."""
-        return self.input_tokens + self.cache_read_tokens
+        """How much context this turn carried: fresh input, plus what was read from
+        cache, plus what it wrote INTO the cache. A cache-priming turn -- tiny input,
+        no cache read, but ~200k of cache creation -- is a large-context turn by any
+        honest measure, so leaving cache_creation out systematically understates the
+        large-context share for exactly the turns that load a big context."""
+        return self.input_tokens + self.cache_read_tokens + self.cache_creation_tokens
 
 
 @dataclass
@@ -170,14 +182,18 @@ def iter_jsonl_files(root: Path | str) -> list[Path]:
         return []
 
 
-def read_new_lines(path: Path | str, offset: int) -> tuple[list[str], int]:
+def read_new_lines(
+    path: Path | str, offset: int, max_bytes: int = MAX_READ_BYTES
+) -> tuple[list[str], int]:
     """Lines appended to ``path`` since byte ``offset``. Returns ``(lines, new_offset)``.
 
     Only complete, newline-terminated lines are returned; a trailing partial line is
     left unread so a file mid-write is never half-parsed, and ``new_offset`` advances
-    only past what was consumed. If the file shrank below ``offset`` (rotated or
-    truncated) the read restarts from the beginning. Any OS error yields no lines and
-    the offset unchanged, so a transient read failure simply retries next run.
+    only past what was consumed. At most ~``max_bytes`` is pulled in per call (the read
+    stops at the first chunk that contains a newline, so a huge file is drained in
+    bounded pieces across successive calls); a single line longer than the cap is still
+    read whole so progress is guaranteed. Any OS error yields no lines and the offset
+    unchanged, so a transient read failure simply retries next run.
     """
     path = Path(path)
     try:
@@ -185,13 +201,31 @@ def read_new_lines(path: Path | str, offset: int) -> tuple[list[str], int]:
     except OSError:
         return [], offset
     if offset > size:
-        offset = 0  # truncated or rotated out from under us
+        # The file is SMALLER than where we last read, so restart from the beginning.
+        # Claude Code transcripts are append-only -- they only ever grow -- so in
+        # practice this fires only on a genuine rotation/truncation, and full
+        # file-identity reconciliation (detecting a same-size replacement, or an
+        # append after a truncation that would double-count) is intentionally omitted:
+        # it cannot arise under the append-only assumption this subsystem is built on.
+        offset = 0
     if offset >= size:
         return [], offset
     try:
         with path.open("rb") as handle:
             handle.seek(offset)
-            data = handle.read()
+            chunks: list[bytes] = []
+            # Read in capped pieces, stopping as soon as a piece contains a newline.
+            # In the common case the first piece has many lines and the loop ends after
+            # one read; only a line longer than the cap forces further reads, and then
+            # just enough to reach its terminating newline.
+            while True:
+                piece = handle.read(max(1, max_bytes))
+                if not piece:
+                    break
+                chunks.append(piece)
+                if b"\n" in piece:
+                    break
+            data = b"".join(chunks)
     except OSError:
         return [], offset
 

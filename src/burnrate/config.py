@@ -64,9 +64,7 @@ class Config:
             poll_interval=_positive_float_env(
                 "BURNRATE_POLL_INTERVAL", 60.0, MAX_POLL_INTERVAL_SECONDS
             ),
-            attribution_dir=Path(
-                _str_env("BURNRATE_PROJECTS_DIR", str(DEFAULT_ATTRIBUTION_DIR))
-            ).expanduser(),
+            attribution_dir=_path_env("BURNRATE_PROJECTS_DIR", DEFAULT_ATTRIBUTION_DIR),
         )
 
 
@@ -105,7 +103,20 @@ def _db_path_env() -> Path:
     directory and startup died with "unable to open database file", while the
     installer saw a non-empty path and baked it into the plist.
     """
-    raw = Path(_str_env("BURNRATE_DB", str(DEFAULT_DB_PATH))).expanduser()
+    return _path_env("BURNRATE_DB", DEFAULT_DB_PATH)
+
+
+def _path_env(name: str, default: Path) -> Path:
+    """A filesystem path from the environment, expanded (`~`) and made absolute.
+
+    One policy for every path setting, so the agent (whose cwd is the plist's
+    WorkingDirectory), a foreground run, and `uninstall.sh` all resolve a relative
+    override the same way instead of against whichever cwd they happened to have.
+    `BURNRATE_PROJECTS_DIR` needs this for the same reason `BURNRATE_DB` does: a
+    relative value would otherwise name a different directory under launchd than in a
+    shell. Relative-to-cwd is deliberate and matches how the installer bakes it in.
+    """
+    raw = Path(_str_env(name, str(default))).expanduser()
     return raw if raw.is_absolute() else Path.cwd() / raw
 
 

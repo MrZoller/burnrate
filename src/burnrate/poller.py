@@ -46,10 +46,15 @@ RETRY_AFTER_MAX_SECONDS = 3600.0
 # any interval, and the work is two indexed DELETEs.
 PRUNE_EVERY = timedelta(hours=6)
 
-# How often the local token-attribution rollup is refreshed (issue #16). Independent
-# of the poll cadence and of the remote endpoint: the JSONLs are local, so a failing
-# usage fetch must not stop attribution from updating. Each pass reads only the bytes
-# appended since last time, so ten minutes is cheap after the first run.
+# Minimum spacing between local token-attribution rollups (issue #16). This is a
+# floor, not a fixed cadence: aggregation is driven from `poll_once`, so it can only
+# run when a poll runs. It is independent of the remote endpoint's OUTCOME -- it runs
+# before the fetch and a failing usage fetch never stops it -- but not of the poll
+# CADENCE: at a long poll interval, or while backoff has stretched the interval out,
+# the effective spacing is the poll interval when that exceeds this floor. At the
+# default 60s cadence that is invisible; only an unusually long interval makes the
+# rollup lag. Each pass reads only the bytes appended since last time, so ten minutes
+# is cheap after the first run.
 AGGREGATE_EVERY = timedelta(minutes=10)
 
 # Doublings past which the backoff ceiling has certainly been reached, so the
@@ -307,7 +312,13 @@ class Poller:
             logger.exception("prune failed")
 
     async def _maybe_aggregate(self, now: datetime) -> None:
-        """Refresh the local attribution rollup, at most once per AGGREGATE_EVERY.
+        """Refresh the local attribution rollup, no more often than AGGREGATE_EVERY.
+
+        Called from `poll_once`, so its real spacing is the larger of AGGREGATE_EVERY
+        and the poll interval -- there is no separate timer, and at a long interval (or
+        during backoff) the rollup is only as fresh as the last poll. It does not depend
+        on the fetch SUCCEEDING, though: it runs before the fetch and every failure path
+        still lets the next poll reach it, so a broken usage endpoint never freezes it.
 
         Runs the parse and the SQLite writes on a worker thread so a large first pass
         over the transcript tree never blocks the event loop, and swallows everything:
