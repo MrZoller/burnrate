@@ -627,21 +627,32 @@ async function loadHistory(hours) {
   return response.json();
 }
 
-/* Identifies the newest /api/now request in flight. refresh() is driven by
- * setInterval and does not await the previous call, so once the cadence follows the
- * configured poll interval (as low as 5s) a slow request can be overtaken by a newer
- * one -- and the older response, landing last, would otherwise overwrite
- * state.now/buckets/readingAt/clockSkewMs and visibly regress the dashboard to older
- * utilization, staleness and projection values. Same treatment as historyRequest
- * below: only the newest response is applied. */
+/* refresh() is driven by setInterval and does not await the previous call, so once
+ * the cadence follows the configured poll interval (as low as 5s) a slow /api/now
+ * request can be overtaken by a newer one -- and the older response, landing last,
+ * would otherwise overwrite state.now/buckets/readingAt/clockSkewMs and visibly
+ * regress the dashboard to older utilization, staleness and projection values.
+ *
+ * nowRequest is the newest request ISSUED; appliedNow is the newest whose outcome has
+ * been rendered. The apply guard tests appliedNow, not nowRequest, and that is the
+ * point: a plain `token !== nowRequest` check drops a response merely because a newer
+ * request has STARTED, so when every fetch outlasts the cadence -- each response
+ * arriving after the next tick has already bumped nowRequest -- every outcome is
+ * discarded and the dashboard freezes. Gating on appliedNow applies any response newer
+ * than the last one shown while still dropping a genuinely out-of-order (older) one.
+ * Both the success and failure paths advance the watermark, so the newest OUTCOME
+ * wins: an older success cannot overwrite a newer failure's outage banner, nor the
+ * reverse. */
 let nowRequest = 0;
+let appliedNow = 0;
 
 async function refresh({ history = true } = {}) {
   const token = ++nowRequest;
   els.page.dataset.refreshing = "true";
   try {
     const data = await loadNow();
-    if (token !== nowRequest) return;
+    if (token <= appliedNow) return;
+    appliedNow = token;
     state.now = data;
     state.buckets = data.buckets || [];
     // Re-measured every fetch rather than once, so a clock that gets corrected while
@@ -676,7 +687,12 @@ async function refresh({ history = true } = {}) {
 
     if (history) await refreshHistory();
   } catch (error) {
-    if (token !== nowRequest) return;
+    // Strict `<`, not `<=`: tokens are unique per invocation, so token === appliedNow
+    // here can only mean this same invocation already applied its success and then a
+    // render threw -- fall through and surface the failure loudly rather than swallow
+    // it. A genuinely out-of-order (older) failure is token < appliedNow and still drops.
+    if (token < appliedNow) return;
+    appliedNow = token;
     renderBanner(null, String(error.message || error));
     els.freshness.textContent = state.readingAt
       ? `Stale — last read ${formatAge((Date.now() - state.readingAt) / 1000)}`
