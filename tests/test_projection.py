@@ -126,6 +126,27 @@ def test_a_full_bucket_inside_its_window_still_reports_at_cap():
     assert project(weekly(100.0), now=NOW).status == AT_CAP
 
 
+@pytest.mark.parametrize(
+    "resets_at",
+    [
+        datetime(1, 1, 1, tzinfo=UTC),
+        datetime(1, 1, 8, tzinfo=UTC),
+        datetime(9999, 12, 31, tzinfo=UTC),
+    ],
+)
+def test_an_out_of_range_reset_costs_the_projection_not_the_page(resets_at):
+    """The parser refuses these now, so this is the backstop. `project` runs inside
+    /api/now with no handler above it, and subtracting the period from 0001-01-01
+    raises OverflowError -- the second overflow found in this function, which is why
+    it is guarded rather than only fixed at the source."""
+    bucket = Bucket(key="seven_day", label="Weekly", utilization=40.0, resets_at=resets_at)
+
+    projection = project(bucket, now=NOW)
+
+    assert projection.status in {UNAVAILABLE, INSUFFICIENT_DATA}
+    assert projection.hits_cap_at is None
+
+
 def test_no_bucket_is_unavailable_not_a_crash():
     assert project(None, now=NOW).status == UNAVAILABLE
 

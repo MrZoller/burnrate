@@ -117,8 +117,22 @@ def project(
         )
 
     period = timedelta(hours=period_hours_for(bucket.key))
-    window_start = bucket.resets_at - period
-    elapsed_hours = (now - window_start).total_seconds() / 3600.0
+    # Guarded because this runs inside /api/now, where an exception is a 500 for the
+    # whole dashboard rather than one bad projection. The parser now refuses resets
+    # implausibly far from now, which is where this belongs and where the warning
+    # comes from -- but that is the second overflow found in this function, and a
+    # reading that cannot be projected should cost the projection, never the page.
+    try:
+        window_start = bucket.resets_at - period
+        elapsed_hours = (now - window_start).total_seconds() / 3600.0
+    except (OverflowError, OSError, ValueError):
+        return Projection(
+            status=UNAVAILABLE,
+            message="The reported reset time is out of range, so no window can be derived.",
+            bucket_key=bucket.key,
+            utilization=bucket.utilization,
+            resets_at=bucket.resets_at,
+        )
 
     base = {
         "bucket_key": bucket.key,

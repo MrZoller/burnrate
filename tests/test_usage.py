@@ -1,6 +1,6 @@
 """Schema tolerance. Every test here is a shape the endpoint could return."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -256,6 +256,41 @@ def test_a_limits_entry_missing_its_reset_borrows_the_top_level_one(live_respons
     assert bucket.utilization == 14.0, "the richer limits percentage still wins"
     assert bucket.resets_at is not None, "the top-level reset must fill the gap"
     assert bucket.resets_at.isoformat().startswith("2026-08-15T16:00")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "0001-01-01T00:00:00+00:00",
+        "9999-12-31T23:59:59+00:00",
+        "1970-01-01T00:00:00Z",
+        "2400-01-01T00:00:00Z",
+    ],
+)
+def test_an_implausible_reset_time_is_refused_with_a_warning(raw):
+    """Syntactically valid is not usable. 0001-01-01 parses fine and then raises
+    OverflowError where the projection subtracts the period from it -- inside
+    /api/now, which has no handler, so one malformed bucket took the whole dashboard
+    to a 500. 9999-12-31 did not crash but was accepted in silence, which is the
+    other failure this project cares about."""
+    snapshot = parse_usage({"five_hour": {"utilization": 12, "resets_at": raw}})
+
+    bucket = snapshot.bucket("five_hour")
+    assert bucket is not None, "the reading itself is still usable"
+    assert bucket.resets_at is None
+    assert any("implausibly far" in w for w in snapshot.warnings), snapshot.warnings
+
+
+@pytest.mark.parametrize("offset_days", [0, 7, 365, 3000])
+def test_a_plausible_reset_time_is_kept(offset_days):
+    """The bound has to be generous enough that clock skew or a longer period could
+    never trip it."""
+    raw = (datetime.now(UTC) + timedelta(days=offset_days)).isoformat()
+
+    snapshot = parse_usage({"five_hour": {"utilization": 12, "resets_at": raw}})
+
+    assert snapshot.bucket("five_hour").resets_at is not None
+    assert snapshot.warnings == ()
 
 
 def test_a_reset_only_top_level_twin_still_supplies_the_countdown():

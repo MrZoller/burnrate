@@ -24,7 +24,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .redact import scrub
@@ -55,6 +55,12 @@ KIND_TO_KEY: dict[str, str] = {
     "session": "five_hour",
     "weekly_all": "seven_day",
 }
+
+# Furthest from now a reset time can be and still be believed. Every real bucket
+# resets within a week; ten years is generous enough that clock skew or a new,
+# longer period could never trip it, while still excluding the values that break
+# the arithmetic downstream.
+MAX_RESET_DISTANCE = timedelta(days=3650)
 
 SESSION_GROUP = "session"
 WEEKLY_GROUP = "weekly"
@@ -346,7 +352,16 @@ def _as_percent(raw: Any) -> float | None:
 
 
 def _parse_timestamp(raw: Any) -> tuple[datetime | None, str | None]:
-    """Parse an ISO-8601 reset time. Returns (value, warning)."""
+    """Parse an ISO-8601 reset time. Returns (value, warning).
+
+    Syntactically valid is not the same as usable. A reset of 0001-01-01 parses
+    fine and then raises OverflowError where the projection subtracts the period
+    from it -- inside /api/now, which has no handler, so one malformed bucket took
+    the whole dashboard to a 500. A reset of 9999-12-31 did not crash but was
+    accepted in silence, which is the other failure this project cares about. Both
+    are now refused with a warning, so the banner lights and the bucket simply has
+    no countdown.
+    """
     if raw is None:
         return None, None
     if not isinstance(raw, str):
@@ -355,7 +370,10 @@ def _parse_timestamp(raw: Any) -> tuple[datetime | None, str | None]:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
         return None, f"unparseable resets_at {raw!r}"
-    return (parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)), None
+    parsed = parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    if abs(parsed - datetime.now(UTC)) > MAX_RESET_DISTANCE:
+        return None, f"resets_at {raw!r} is implausibly far from now"
+    return parsed, None
 
 
 def _slug(text: str) -> str:

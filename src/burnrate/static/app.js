@@ -669,11 +669,24 @@ async function refresh({ history = true } = {}) {
   }
 }
 
+/* Identifies the newest history request in flight. Two can overlap -- click 24h
+ * then 3d, or click a range while the 60s refresh is already fetching -- and the
+ * slower earlier one could land last, so its data became state.history while
+ * renderCharts scaled it against the range now selected: a 3-day axis over 24
+ * hours of points, with statistics to match. Only the newest response is applied,
+ * and it carries its own range so nothing has to infer one. */
+let historyRequest = 0;
+
 async function refreshHistory() {
+  const token = ++historyRequest;
+  const hours = state.hours;
   try {
-    state.history = await loadHistory(state.hours);
+    const data = await loadHistory(hours);
+    if (token !== historyRequest) return;
+    state.history = data;
     renderCharts(state.history);
   } catch (error) {
+    if (token !== historyRequest) return;
     els.charts.replaceChildren(
       el("div", { class: "chart" }, [
         el("div", { class: "chart__empty", text: `History unavailable: ${error.message}` }),
@@ -726,7 +739,12 @@ function renderHistoryTable(series, isCurrentFor) {
 
 function renderCharts(data) {
   const end = Date.now();
-  const start = end - state.hours * 3600 * 1000;
+  // The window comes from the payload, not from state.hours. The backend already
+  // reports the range it answered for, and taking it from there means a redraw from
+  // cache -- what the outage path does -- cannot scale old points against a range
+  // selected since.
+  const hours = Number(data.hours) > 0 ? Number(data.hours) : state.hours;
+  const start = end - hours * 3600 * 1000;
   const order = new Map(state.buckets.map((b, i) => [b.key, i]));
   // Keys the API is reporting right now. Empty when /api/now has never
   // succeeded, which correctly makes every series read as historical rather
