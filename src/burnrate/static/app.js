@@ -1015,17 +1015,25 @@ let appliedAttribution = 0;
 
 async function refreshAttribution() {
   const token = ++attributionRequest;
+  // The window this request is FOR, captured before the await so both outcomes below
+  // compare against what was actually requested rather than whatever is selected now.
+  const requested = state.attrWindow;
   try {
-    const data = await loadAttribution(state.attrWindow);
+    const data = await loadAttribution(requested);
     // The watermark orders same-window races, but not window identity: a 7d response
     // landing after the user clicked 24h would otherwise render 7d figures under the
-    // pressed 24h button (forever, if the 24h request hangs). Drop a response whose
-    // window is no longer the selected one, and do NOT advance the watermark for it.
-    if (data.window !== state.attrWindow) return;
+    // pressed 24h button (forever, if the 24h request hangs). Drop a superseded-window
+    // response, and do NOT advance the watermark for it.
+    if (requested !== state.attrWindow) return;
     if (token <= appliedAttribution) return;
     appliedAttribution = token;
     renderAttribution(data);
   } catch (error) {
+    // A superseded window's FAILURE is the converse of the success case and must be
+    // dropped the same way -- otherwise a stale 7d failure (issued while 24h is now
+    // selected) would paint "unavailable" into the 24h panel and, since it advances the
+    // watermark, stick there if the 24h request hangs. Checked before the watermark.
+    if (requested !== state.attrWindow) return;
     // Strict `<`, like the /api/now failure path: token === appliedAttribution here can
     // only mean this same invocation already applied its success and then render threw,
     // so fall through and surface the failure rather than swallowing it.
