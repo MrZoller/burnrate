@@ -221,6 +221,47 @@ def test_every_accepted_utilization_produces_a_usable_projection(utilization):
         assert projection.hits_cap_at > NOW
 
 
+def test_a_reading_taken_before_the_reset_does_not_project_across_it():
+    """Regression: anchoring the whole projection to the reading time meant the
+    period-ended guard was asked of the reading rather than of now. A sample taken
+    30s before a reset, requested 60s after it, is still fresh by staleness -- and an
+    85% bucket reported "clears the reset" for a window that no longer existed."""
+    resets_at = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    bucket = Bucket(key="seven_day", label="Weekly", utilization=85.0, resets_at=resets_at)
+
+    projection = project(
+        bucket,
+        now=resets_at + timedelta(seconds=60),
+        reading_at=resets_at - timedelta(seconds=30),
+    )
+
+    assert projection.status == UNAVAILABLE
+    assert "already passed" in projection.message
+    assert projection.hits_cap_at is None
+
+
+def test_the_rate_still_comes_from_the_reading_not_the_request():
+    """The other half: the two clocks must stay separate, or fixing the guard would
+    reintroduce the dilution that anchoring to the reading fixed."""
+    resets_at = NOW + WEEK - timedelta(hours=5.75)
+    bucket = Bucket(key="seven_day", label="Weekly", utilization=14.0, resets_at=resets_at)
+
+    # Requested an hour after the sample, still well inside the window.
+    projection = project(bucket, now=NOW + timedelta(hours=1), reading_at=NOW)
+
+    assert projection.status == PROJECTED
+    assert projection.elapsed_hours == pytest.approx(5.75, abs=1e-6)
+    assert projection.rate_per_hour == pytest.approx(14.0 / 5.75, rel=1e-9)
+
+
+def test_reading_at_defaults_to_now():
+    """Callers with a single clock keep the old behaviour exactly."""
+    with_default = project(weekly(14.0), now=NOW)
+    explicit = project(weekly(14.0), now=NOW, reading_at=NOW)
+
+    assert with_default == explicit
+
+
 def test_a_stale_reading_refuses_to_project():
     """Regression: /api/now projected the last known utilization against the
     current clock, so every hour since the sample counted as zero usage. A

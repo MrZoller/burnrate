@@ -40,22 +40,21 @@ fi
 #
 # launchd also starts the agent with none of this shell's environment, so whatever
 # comes back here has to be baked into the plist or it is simply absent at runtime.
-EFFECTIVE=$("$PYTHON" -m burnrate.config) \
-  || die "could not read the effective configuration"
-# IFS= on every read, or the shell strips leading and trailing whitespace from each
-# line. A path legitimately ending in a space would then differ between the plist and
-# a foreground run using the same environment -- which defeats the point of taking
-# these values from the package in the first place.
+# NUL-separated, and read straight from the process. Newline-delimited records could
+# not survive a path containing a newline -- legal in a POSIX filename, where only `/`
+# and NUL are forbidden -- which split one value into two and shifted the host into
+# the port. NUL is the one byte a path cannot contain, so it is the only lossless
+# delimiter here; it also cannot pass through `$(...)`, which strips NULs, hence the
+# process substitution. `IFS=` keeps leading and trailing whitespace, which a plain
+# `read` would strip.
 {
-  IFS= read -r DB
-  IFS= read -r HOST
-  IFS= read -r PORT
-  IFS= read -r INTERVAL
-} <<EOF
-$EFFECTIVE
-EOF
+  IFS= read -r -d '' DB
+  IFS= read -r -d '' HOST
+  IFS= read -r -d '' PORT
+  IFS= read -r -d '' INTERVAL
+} < <("$PYTHON" -m burnrate.config --null)
 [ -n "$DB" ] && [ -n "$HOST" ] && [ -n "$PORT" ] && [ -n "$INTERVAL" ] \
-  || die "incomplete configuration: $EFFECTIVE"
+  || die "could not read the effective configuration from burnrate.config"
 
 mkdir -p "$HOME/Library/LaunchAgents" "$(dirname "$LOG")" "$(dirname "$DB")"
 

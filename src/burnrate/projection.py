@@ -67,20 +67,40 @@ class Projection:
         return self.status == PROJECTED
 
 
+def _aware(value: datetime | None) -> datetime | None:
+    """A timezone-aware copy, treating a naive value as UTC."""
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+
 def period_hours_for(key: str) -> float:
     """How long the bucket's window is, inferred from its canonical key."""
     return _PERIOD_HOURS.get(key, DEFAULT_PERIOD_HOURS)
 
 
 def project(
-    bucket: Bucket | None, now: datetime | None = None, *, stale: bool = False
+    bucket: Bucket | None,
+    now: datetime | None = None,
+    *,
+    reading_at: datetime | None = None,
+    stale: bool = False,
 ) -> Projection:
     """Project when `bucket` reaches 100% at its average rate so far.
 
-    `now` should be the moment the reading was taken, not wall-clock now. The rate
-    is utilization over time elapsed since the window opened, so a frozen
-    utilization measured against an advancing clock counts every hour since the
-    last sample as zero usage and understates the pace.
+    Two clocks, because two different questions are being asked and one timestamp
+    cannot answer both:
+
+    `now` is wall-clock now, and decides whether this period is still running. Asking
+    that of the reading time instead let a sample taken shortly before a reset
+    project across it -- an 85% bucket whose window had ended a minute ago reported
+    "clears the reset", an all-clear for a period that no longer exists, and at a
+    longer poll interval it would say so for much longer.
+
+    `reading_at` is when the sample was taken and anchors the rate, defaulting to
+    `now`. The rate is utilization over time elapsed since the window opened, so
+    measuring a frozen utilization against an advancing clock counts every hour since
+    the last sample as zero usage and understates the pace.
 
     `stale` refuses outright. That case is not a worse estimate, it is a different
     question: a projection is a claim about where usage is heading *now*, and with
@@ -104,9 +124,8 @@ def project(
             resets_at=bucket.resets_at,
         )
 
-    now = now or datetime.now(UTC)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=UTC)
+    now = _aware(now) or datetime.now(UTC)
+    reading_at = _aware(reading_at) or now
 
     if bucket.resets_at is None:
         return Projection(
@@ -124,7 +143,7 @@ def project(
     # reading that cannot be projected should cost the projection, never the page.
     try:
         window_start = bucket.resets_at - period
-        elapsed_hours = (now - window_start).total_seconds() / 3600.0
+        elapsed_hours = (reading_at - window_start).total_seconds() / 3600.0
     except (OverflowError, OSError, ValueError):
         return Projection(
             status=UNAVAILABLE,
@@ -144,7 +163,9 @@ def project(
 
     # A reset that has already passed invalidates the whole reading, including a
     # 100% one -- the period is over, so "cap reached" would describe a window
-    # that no longer exists. This must outrank AT_CAP, not follow it.
+    # that no longer exists. This must outrank AT_CAP, not follow it, and it is
+    # asked of wall-clock `now`: against the reading time a sample taken just
+    # before a reset projected straight across it.
     if now >= bucket.resets_at:
         return Projection(
             status=UNAVAILABLE,
@@ -163,7 +184,7 @@ def project(
         return Projection(
             status=AT_CAP,
             message="Already at the cap for this period.",
-            hits_cap_at=now,
+            hits_cap_at=reading_at,
             hours_to_cap=0.0,
             **base,
         )
@@ -192,7 +213,7 @@ def project(
     # a pace that cannot reach the cap within this period does not need its crossing
     # time computed exactly, only recognised.
     rate = bucket.utilization / elapsed_hours
-    hours_remaining = (bucket.resets_at - now).total_seconds() / 3600.0
+    hours_remaining = (bucket.resets_at - reading_at).total_seconds() / 3600.0
 
     if rate <= 0.0 or not math.isfinite(rate):
         return Projection(
@@ -213,7 +234,7 @@ def project(
             status=CLEARS_RESET,
             message="At this pace the period resets before the cap is reached.",
             rate_per_hour=rate,
-            hits_cap_at=now + timedelta(hours=horizon) if math.isfinite(horizon) else None,
+            hits_cap_at=(reading_at + timedelta(hours=horizon) if math.isfinite(horizon) else None),
             hours_to_cap=hours_to_cap if math.isfinite(hours_to_cap) else None,
             **base,
         )
@@ -223,7 +244,7 @@ def project(
         status=PROJECTED,
         message="At this pace the cap is reached before the period resets.",
         rate_per_hour=rate,
-        hits_cap_at=now + timedelta(hours=hours_to_cap),
+        hits_cap_at=reading_at + timedelta(hours=hours_to_cap),
         hours_to_cap=hours_to_cap,
         **base,
     )

@@ -82,8 +82,8 @@ def _db_path_env() -> Path:
     return raw if raw.is_absolute() else Path.cwd() / raw
 
 
-def print_effective(stream: TextIO | None = None) -> None:
-    """Print the settings this process would actually use, one per line.
+def print_effective(stream: TextIO | None = None, separator: str = "\n") -> None:
+    """Emit the settings this process would actually use, one record each.
 
     `deploy/install.sh` reads this to bake the plist and to build its readiness
     URL. It exists so there is one implementation of the validation rules instead
@@ -93,13 +93,17 @@ def print_effective(stream: TextIO | None = None) -> None:
 
     Order is the contract -- db, host, port, interval -- and is pinned by a test,
     because a silent reordering here would misconfigure the agent rather than fail.
+
+    `separator` exists because a path may legally contain a newline: only `/` and
+    NUL are forbidden in a POSIX filename. Newline-delimited records turned such a
+    path into two, shifting the host into the port and corrupting everything after
+    it, so the installer asks for NUL separators -- the one byte a path cannot hold.
+    The default stays newline for reading by eye.
     """
     config = Config.from_env()
     out = stream if stream is not None else sys.stdout
-    print(config.db_path, file=out)
-    print(config.host, file=out)
-    print(config.port, file=out)
-    print(config.poll_interval, file=out)
+    for value in (config.db_path, config.host, config.port, config.poll_interval):
+        out.write(f"{value}{separator}")
 
 
 def _int_env(name: str, default: int, lo: int, hi: int) -> int:
@@ -137,4 +141,4 @@ def _positive_float_env(name: str, default: float, maximum: float) -> float:
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised via subprocess
-    print_effective()
+    print_effective(separator="\0" if "--null" in sys.argv[1:] else "\n")

@@ -86,7 +86,7 @@ def create_app(config: Config | None = None) -> FastAPI:
                 "poll_interval_seconds": config.poll_interval,
                 "buckets": [_bucket_json(b) for b in buckets],
                 "projection": _projection_json(
-                    project(weekly, now=reading_at or moment, stale=stale)
+                    project(weekly, now=moment, reading_at=reading_at, stale=stale)
                 ),
                 "status": poller.status.as_dict(),
             }

@@ -161,8 +161,9 @@ def test_the_freshness_window_never_drops_below_the_floor():
 
 
 def test_print_effective_order_is_the_installers_contract(monkeypatch, capsys):
-    """install.sh reads these four lines positionally, so a reordering here would
-    silently misconfigure the agent instead of failing. Pinned rather than trusted."""
+    """install.sh reads these four records positionally, so a reordering here would
+    silently misconfigure the agent instead of failing. Pinned rather than trusted.
+    The newline form is kept for reading by eye; the installer asks for NUL."""
     monkeypatch.setenv("BURNRATE_HOST", "127.0.0.1")
     monkeypatch.setenv("BURNRATE_PORT", "9999")
     monkeypatch.setenv("BURNRATE_POLL_INTERVAL", "15")
@@ -209,3 +210,37 @@ def test_the_default_binding_is_lan_reachable():
     machines on the tailnet. Pinned so it cannot be narrowed by accident."""
     assert Config().host == "0.0.0.0"
     assert Config().port == 8377
+
+
+def test_null_separated_output_survives_a_newline_in_the_path(monkeypatch, capsys):
+    """Regression: only `/` and NUL are forbidden in a POSIX filename, so a path may
+    contain a newline. Newline-delimited records split it in two, shifting the host
+    into the port and corrupting every value after it. NUL is the one byte the path
+    cannot hold."""
+    monkeypatch.setenv("BURNRATE_DB", "/tmp/burnrate\nwith a newline.db")
+    monkeypatch.setenv("BURNRATE_HOST", "127.0.0.1")
+    monkeypatch.setenv("BURNRATE_PORT", "9999")
+    monkeypatch.setenv("BURNRATE_POLL_INTERVAL", "15")
+
+    print_effective(separator="\0")
+
+    records = capsys.readouterr().out.split("\0")[:-1]
+    assert records == ["/tmp/burnrate\nwith a newline.db", "127.0.0.1", "9999", "15.0"]
+
+
+def test_the_module_emits_nul_records_when_asked(monkeypatch):
+    """install.sh invokes it with --null, so that flag is part of the contract."""
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-m", "burnrate.config", "--null"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "BURNRATE_DB": "/tmp/a\nb.db", "BURNRATE_HOST": "127.0.0.1"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split("\0")[:2] == ["/tmp/a\nb.db", "127.0.0.1"]
+    assert "\n" in result.stdout, "the path's own newline must survive"
