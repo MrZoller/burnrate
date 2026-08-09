@@ -77,8 +77,19 @@ class UsageHTTPError(UsageFetchError):
     server-error bodies were the ones being dropped.
     """
 
-    def __init__(self, status_code: int, detail: str = "", body: str = "") -> None:
+    def __init__(
+        self,
+        status_code: int,
+        detail: str = "",
+        body: str = "",
+        retry_after: str | None = None,
+    ) -> None:
         self.status_code = status_code
+        # The raw Retry-After header, unparsed and only ever set on a 429 -- the
+        # server naming the earliest it will answer again. Defaulted to None so every
+        # existing construction stays valid; the poller owns the tolerant parse and
+        # the backoff interaction (issue #7), which keeps this a thin transport mapper.
+        self.retry_after = retry_after
         suffix = f": {detail}" if detail else ""
         super().__init__(f"HTTP {status_code}{suffix}", body=body)
 
@@ -135,10 +146,18 @@ async def fetch_usage(
                 body=_short_body(response, access_token, limit=ARCHIVE_BODY_LIMIT),
             )
         if response.status_code >= 400:
+            # Retry-After is captured only for a 429: it is the rate limiter naming
+            # the earliest it will answer, and honouring it is the point of issue #7.
+            # Carrying it on any other status risks a value being read as one the
+            # server never sent. Absent header -> None; the poller parses it.
+            retry_after = (
+                response.headers.get("Retry-After") if response.status_code == 429 else None
+            )
             raise UsageHTTPError(
                 response.status_code,
                 _short_body(response, access_token),
                 body=_short_body(response, access_token, limit=ARCHIVE_BODY_LIMIT),
+                retry_after=retry_after,
             )
 
         try:

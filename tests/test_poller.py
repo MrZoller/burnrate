@@ -1,7 +1,8 @@
 """Poll-loop behavior: the 401 re-read, backoff, and failing loudly."""
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 
 import pytest
 
@@ -13,7 +14,7 @@ from burnrate.client import (
     UsageTransportError,
 )
 from burnrate.credentials import Credential, CredentialError
-from burnrate.poller import MAX_BACKOFF_SECONDS, Poller
+from burnrate.poller import MAX_BACKOFF_SECONDS, RETRY_AFTER_MAX_SECONDS, Poller
 from burnrate.store import Store
 from burnrate.usage import parse_usage
 
@@ -849,3 +850,178 @@ async def test_an_ordinary_payload_is_unchanged_by_the_scrub(store, monkeypatch,
         "nimbus_quill",
     ]
     assert snapshot.warnings == ()
+
+
+# ----------------------------------------------------- Retry-After on a 429 (#7)
+
+
+def test_retry_after_parses_integer_delta_seconds():
+    assert poller_module._parse_retry_after("120") == 120.0
+
+
+def test_retry_after_parses_an_http_date():
+    """RFC 7231's other form: an absolute HTTP-date, honoured as the seconds from now
+    until that moment."""
+    header = format_datetime(datetime.now(UTC) + timedelta(seconds=120), usegmt=True)
+
+    seconds = poller_module._parse_retry_after(header)
+
+    assert seconds is not None
+    assert 110 <= seconds <= 120, f"expected ~120s until the date, got {seconds}"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(None, id="absent"),
+        pytest.param("", id="empty"),
+        pytest.param("not-a-date", id="malformed"),
+        pytest.param("-5", id="negative"),
+    ],
+)
+def test_retry_after_falls_back_to_none_for_unusable_values(value):
+    """Absent, malformed, or negative each reads as "no Retry-After", so a bad header
+    can only ever fall back to plain backoff -- never shorten it."""
+    assert poller_module._parse_retry_after(value) is None
+
+
+def test_a_429_retry_after_larger_than_the_backoff_wins(store):
+    """Retrying sooner than the rate limiter asked prolongs the limit, so a larger
+    Retry-After is a hard floor on the next attempt."""
+    poller = Poller(store, interval=60.0)
+    poller.status.consecutive_failures = 1  # exponential term would be 60s
+    poller._retry_after_seconds = 300.0
+
+    assert poller.next_delay() == 300.0
+
+
+def test_a_429_retry_after_may_exceed_the_backoff_ceiling(store):
+    """The 900s ceiling clamps the exponential term, not a delay the server explicitly
+    demanded -- retrying before it is pointless. 1800s is above the ceiling but below
+    the RETRY_AFTER_MAX_SECONDS sanity cap, so it shows R beating the ceiling cleanly."""
+    poller = Poller(store, interval=60.0)
+    poller.status.consecutive_failures = 20  # exponential term is capped at 900s
+    poller._retry_after_seconds = 1800.0
+
+    assert poller.next_delay() == 1800.0
+    assert poller.next_delay() > MAX_BACKOFF_SECONDS
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("99999999", id="huge-integer"),
+        pytest.param(
+            format_datetime(datetime.now(UTC) + timedelta(days=365), usegmt=True),
+            id="far-future-date",
+        ),
+    ],
+)
+def test_a_pathological_retry_after_is_clamped_to_the_cap(value):
+    """A header far above any legitimate value -- Retry-After: 99999999, a date a year
+    out -- must not stall an unattended dashboard until restart; it resolves to exactly
+    the sanity cap, not the raw value."""
+    assert poller_module._parse_retry_after(value) == RETRY_AFTER_MAX_SECONDS
+
+
+def test_a_clamped_retry_after_still_beats_the_backoff(store):
+    """The capped value is a real floor: when it exceeds the exponential term it is
+    what next_delay returns."""
+    poller = Poller(store, interval=60.0)
+    poller.status.consecutive_failures = 1  # exponential term would be 60s
+    poller._retry_after_seconds = poller_module._parse_retry_after("99999999")
+
+    assert poller.next_delay() == RETRY_AFTER_MAX_SECONDS
+
+
+def test_a_429_retry_after_smaller_than_the_backoff_is_ignored(store):
+    """Waiting longer than asked is harmless, so when backoff already dictates longer
+    we keep that."""
+    poller = Poller(store, interval=60.0)
+    poller.status.consecutive_failures = 4  # exponential term is 480s
+    poller._retry_after_seconds = 100.0
+
+    assert poller.next_delay() == 480.0
+
+
+async def test_a_429_retry_after_sets_the_next_delay_floor(store, monkeypatch):
+    """End to end through the client's error: a 429 carrying Retry-After makes the
+    delay that follows at least that long."""
+    _credentials(monkeypatch, "tok")
+
+    def handler(token, n):
+        raise UsageHTTPError(429, "slow down", retry_after="300")
+
+    _fetches(monkeypatch, handler)
+    poller = Poller(store, interval=60.0)
+
+    await poller.poll_once()
+
+    assert poller.status.consecutive_failures == 1
+    assert poller.next_delay() == 300.0  # max(60s backoff, 300s Retry-After)
+
+
+async def test_a_429_without_a_retry_after_uses_plain_backoff(store, monkeypatch):
+    """Scope check: 429 is the honoured status, but only when it actually carried a
+    usable header. Without one it is ordinary exponential backoff."""
+    _credentials(monkeypatch, "tok")
+
+    def handler(token, n):
+        raise UsageHTTPError(429, "slow down")  # no Retry-After
+
+    _fetches(monkeypatch, handler)
+    poller = Poller(store, interval=60.0)
+
+    await poller.poll_once()
+
+    assert poller._retry_after_seconds is None
+    assert poller.next_delay() == 60.0
+
+
+async def test_a_429_retry_after_does_not_persist_past_a_success(store, monkeypatch, live_response):
+    """The floor applied to the backoff after that 429 alone; a success ends the streak
+    and must clear it so it never colours a later one."""
+    _credentials(monkeypatch, "tok")
+    outcome = {"fail": True}
+
+    def handler(token, n):
+        if outcome["fail"]:
+            raise UsageHTTPError(429, "slow down", retry_after="300")
+        return live_response
+
+    _fetches(monkeypatch, handler)
+    poller = Poller(store, interval=60.0)
+
+    await poller.poll_once()
+    assert poller._retry_after_seconds == 300.0
+
+    outcome["fail"] = False
+    await poller.poll_once()
+
+    assert poller._retry_after_seconds is None
+    assert poller.next_delay() == 60.0  # steady state, no lingering floor
+
+
+async def test_a_non_429_failure_clears_a_prior_retry_after(store, monkeypatch):
+    """A 429's Retry-After must not colour an unrelated later backoff: a following
+    non-429 failure falls back to pure exponential."""
+    _credentials(monkeypatch, "tok")
+    outcome = {"status": 429}
+
+    def handler(token, n):
+        if outcome["status"] == 429:
+            raise UsageHTTPError(429, "slow down", retry_after="300")
+        raise UsageHTTPError(500, "upstream down")
+
+    _fetches(monkeypatch, handler)
+    poller = Poller(store, interval=60.0)
+
+    await poller.poll_once()
+    assert poller._retry_after_seconds == 300.0
+
+    outcome["status"] = 500
+    await poller.poll_once()
+
+    assert poller._retry_after_seconds is None
+    assert poller.status.consecutive_failures == 2
+    assert poller.next_delay() == 120.0  # pure exponential for two failures

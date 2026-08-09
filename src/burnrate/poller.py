@@ -16,11 +16,12 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
 
-from .client import UsageAuthError, UsageFetchError, fetch_usage
+from .client import UsageAuthError, UsageFetchError, UsageHTTPError, fetch_usage
 from .credentials import CredentialError, read_credential
 from .redact import scrub, scrub_json
 from .store import Store
@@ -31,6 +32,12 @@ logger = logging.getLogger("burnrate.poller")
 POLL_INTERVAL_SECONDS = 60.0
 MAX_BACKOFF_SECONDS = 900.0
 BACKOFF_FACTOR = 2.0
+# A generous sanity cap on a 429's Retry-After. Real rate-limit values are
+# seconds-to-minutes, so an hour is far beyond any legitimate one; capping there
+# bounds a pathological or malformed header -- Retry-After: 99999999, a far-future
+# HTTP-date -- without touching real ones. On an unattended dashboard an uncapped
+# value would stall polling until the process was restarted.
+RETRY_AFTER_MAX_SECONDS = 3600.0
 # Retention is scheduled by elapsed time, not by a poll count. Tied to attempts it
 # scaled with the interval: at the supported one-day maximum, "every 60 polls" meant
 # every 60 days, so a 14-day raw window could hold bodies for 73 and the 90-day
@@ -94,6 +101,11 @@ class Poller:
         self._task: asyncio.Task[None] | None = None
         self._stopping = asyncio.Event()
         self._last_prune_at: datetime | None = None
+        # Parsed Retry-After (seconds) from the most recent 429, consumed by the very
+        # next `next_delay` and then cleared -- see `_record_failure` and `next_delay`.
+        # None means "no server-set floor", the state after any success or non-429
+        # failure, so a stale value can never leak into an unrelated backoff.
+        self._retry_after_seconds: float | None = None
 
     async def start(self) -> None:
         if self._client is None:
@@ -176,7 +188,17 @@ class Poller:
         # often. Retrying is allowed to be no gentler than normal polling; it must
         # never be more aggressive.
         ceiling = max(MAX_BACKOFF_SECONDS, self.interval)
-        return min(self.interval * (BACKOFF_FACTOR**steps), ceiling)
+        backoff = min(self.interval * (BACKOFF_FACTOR**steps), ceiling)
+        # A 429's Retry-After is a hard lower bound on the next attempt (issue #7).
+        # Retrying SOONER than a rate limiter asked prolongs the limit, so R wins
+        # whenever it is the larger of the two -- including past the 900s ceiling,
+        # which clamps the exponential term only, not a value the server explicitly
+        # demanded (retrying before it is pointless). Waiting LONGER than asked is
+        # harmless, so when backoff already dictates longer we keep that. Set only
+        # after a 429, cleared otherwise, so it never colours an unrelated backoff.
+        if self._retry_after_seconds is not None:
+            return max(backoff, self._retry_after_seconds)
+        return backoff
 
     async def poll_once(self) -> UsageSnapshot | None:
         """One fetch/parse/store cycle. Records outcome in `status`; never raises."""
@@ -202,7 +224,9 @@ class Poller:
             # quiet -- were not. The body arrives already redacted.
             if exc.body:
                 self._archive_unreadable(exc.body, now)
-            self._record_failure(_error_kind(exc), str(exc))
+            self._record_failure(
+                _error_kind(exc), str(exc), retry_after_seconds=_retry_after_from(exc)
+            )
             return None
         except Exception as exc:  # noqa: BLE001 - the loop must survive anything
             logger.exception("unexpected poll failure")
@@ -248,6 +272,9 @@ class Poller:
         self.status.last_error = None
         self.status.last_error_kind = None
         self.status.consecutive_failures = 0
+        # A prior 429's Retry-After applied only to the backoff after that 429; a
+        # success ends the failure streak, so it must not linger into a later one.
+        self._retry_after_seconds = None
         self.status.warnings = snapshot.warnings
         self.status.notices = snapshot.notices
 
@@ -325,7 +352,9 @@ class Poller:
             )
         return scrub_json(payload, credential.access_token)
 
-    def _record_failure(self, kind: str, message: str) -> None:
+    def _record_failure(
+        self, kind: str, message: str, retry_after_seconds: float | None = None
+    ) -> None:
         """Record a failure, scrubbing on the way in.
 
         This is the one place every error message becomes `last_error`, which
@@ -335,11 +364,17 @@ class Poller:
         current path and any added later. `fetch_usage` also scrubs with the exact
         token where it holds one, which catches an echo the pattern would miss; this
         is the backstop for everything that does not.
+
+        `retry_after_seconds` is the parsed Retry-After from a 429 and None for every
+        other failure. Storing it here -- the single seam every failure passes through
+        -- means a 429 sets the floor and any other failure clears it in one place, so
+        `next_delay` reads a value that belongs to the streak it is timing.
         """
         message = scrub(message)
         self.status.consecutive_failures += 1
         self.status.last_error = message
         self.status.last_error_kind = kind
+        self._retry_after_seconds = retry_after_seconds
         logger.warning("poll failed (%s): %s", kind, message)
 
     def staleness_seconds(self, now: datetime | None = None) -> float | None:
@@ -380,6 +415,65 @@ def _unchanged_credential_error(exc: UsageAuthError) -> UsageAuthError:
 
 def _error_kind(exc: UsageFetchError) -> str:
     return type(exc).__name__.removeprefix("Usage").removesuffix("Error").lower() or "fetch"
+
+
+def _retry_after_from(exc: UsageFetchError) -> float | None:
+    """Parsed Retry-After seconds, but only for a 429 that carried a usable one.
+
+    The scope is deliberately narrow (issue #7): retrying sooner than a rate limiter
+    asked is what prolongs the limit, so 429 is the one status whose Retry-After we
+    honour. Any other status, or a 429 whose header was absent or malformed, returns
+    None and falls through to plain exponential backoff.
+    """
+    if isinstance(exc, UsageHTTPError) and exc.status_code == 429:
+        return _parse_retry_after(exc.retry_after)
+    return None
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Seconds to wait per an HTTP Retry-After header, or None if unusable.
+
+    Two standard forms (RFC 7231): a non-negative integer count of delta-seconds, or
+    an HTTP-date whose distance from now gives the delay (floored at 0 -- a date
+    already past means "you may retry now", not a negative wait). Anything else --
+    absent, malformed, or a negative delta -- is treated as no guidance at all, so a
+    broken header can only ever fall back to plain backoff, never shorten it.
+
+    The usable result is clamped to RETRY_AFTER_MAX_SECONDS: a value into
+    [0, RETRY_AFTER_MAX_SECONDS], so a pathological header cannot stall polling.
+    """
+    if value is None:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    # delta-seconds: a bare integer. A negative one is nonsensical here and dropped
+    # rather than clamped, so it reads as "no Retry-After" like any other bad value.
+    try:
+        seconds = int(text)
+    except ValueError:
+        pass
+    else:
+        return _clamp_retry_after(seconds) if seconds >= 0 else None
+    # HTTP-date. parsedate_to_datetime raises ValueError on anything unparseable and
+    # returns GMT/UTC-aware datetimes for well-formed ones; a naive result (an
+    # unusual "-0000" zone) is read as UTC, the zone every HTTP-date is defined in.
+    try:
+        when = parsedate_to_datetime(text)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return _clamp_retry_after((when - datetime.now(UTC)).total_seconds())
+
+
+def _clamp_retry_after(seconds: float) -> float:
+    """A Retry-After delay bounded to [0, RETRY_AFTER_MAX_SECONDS].
+
+    The 0 floor turns an already-past HTTP-date into "retry now"; the ceiling caps a
+    pathological value so a bad header cannot stall an unattended dashboard forever.
+    """
+    return min(RETRY_AFTER_MAX_SECONDS, max(0.0, seconds))
 
 
 def _iso(value: datetime | None) -> str | None:
