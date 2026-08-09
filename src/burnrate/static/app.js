@@ -627,10 +627,21 @@ async function loadHistory(hours) {
   return response.json();
 }
 
+/* Identifies the newest /api/now request in flight. refresh() is driven by
+ * setInterval and does not await the previous call, so once the cadence follows the
+ * configured poll interval (as low as 5s) a slow request can be overtaken by a newer
+ * one -- and the older response, landing last, would otherwise overwrite
+ * state.now/buckets/readingAt/clockSkewMs and visibly regress the dashboard to older
+ * utilization, staleness and projection values. Same treatment as historyRequest
+ * below: only the newest response is applied. */
+let nowRequest = 0;
+
 async function refresh({ history = true } = {}) {
+  const token = ++nowRequest;
   els.page.dataset.refreshing = "true";
   try {
     const data = await loadNow();
+    if (token !== nowRequest) return;
     state.now = data;
     state.buckets = data.buckets || [];
     // Re-measured every fetch rather than once, so a clock that gets corrected while
@@ -665,6 +676,7 @@ async function refresh({ history = true } = {}) {
 
     if (history) await refreshHistory();
   } catch (error) {
+    if (token !== nowRequest) return;
     renderBanner(null, String(error.message || error));
     els.freshness.textContent = state.readingAt
       ? `Stale — last read ${formatAge((Date.now() - state.readingAt) / 1000)}`
@@ -692,7 +704,9 @@ async function refresh({ history = true } = {}) {
       state.buckets.find((b) => b.key === "seven_day"),
     );
   } finally {
-    delete els.page.dataset.refreshing;
+    // Only the newest request owns the spinner; a stale response clearing it while a
+    // newer fetch is still in flight would flicker the indicator off prematurely.
+    if (token === nowRequest) delete els.page.dataset.refreshing;
   }
 }
 
