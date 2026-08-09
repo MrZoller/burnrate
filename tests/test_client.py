@@ -110,6 +110,44 @@ async def test_an_http_error_carries_its_body_for_the_archive(status):
     assert "retry_after" in excinfo.value.body
 
 
+async def test_a_429_captures_the_retry_after_header():
+    """The rate limiter names the earliest it will answer; the client carries the raw
+    header so the poller can honour it (issue #7). Parsing lives in the poller."""
+
+    def handler(request):
+        return httpx.Response(429, text="slow down", headers={"Retry-After": "42"})
+
+    async with _client(handler) as client:
+        with pytest.raises(UsageHTTPError) as excinfo:
+            await fetch_usage(TOKEN, client=client)
+
+    assert excinfo.value.retry_after == "42"
+
+
+async def test_a_429_without_a_retry_after_header_carries_none():
+    """Absent header -> None; the poller then falls back to plain backoff."""
+    async with _client(lambda r: httpx.Response(429, text="slow down")) as client:
+        with pytest.raises(UsageHTTPError) as excinfo:
+            await fetch_usage(TOKEN, client=client)
+
+    assert excinfo.value.retry_after is None
+
+
+@pytest.mark.parametrize("status", [400, 500, 503])
+async def test_retry_after_is_ignored_on_non_429_statuses(status):
+    """Scope: only a 429 means "wait this long". A Retry-After on any other status is
+    not something we act on, so it is never captured."""
+
+    def handler(request):
+        return httpx.Response(status, text="no", headers={"Retry-After": "42"})
+
+    async with _client(handler) as client:
+        with pytest.raises(UsageHTTPError) as excinfo:
+            await fetch_usage(TOKEN, client=client)
+
+    assert excinfo.value.retry_after is None
+
+
 async def test_an_http_error_body_is_redacted():
     """It goes to the database like the others, so the same rules apply."""
     leaky = f'{{"error":"bad token {TOKEN}"}}'
