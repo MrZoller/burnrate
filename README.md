@@ -44,8 +44,10 @@ into your GUI session, and waits for the first successful poll. To remove it:
 | `~/Library/Logs/burnrate.log` | service log |
 | `~/Library/LaunchAgents/com.mrzoller.burnrate.plist` | the agent |
 
-Override defaults with `BURNRATE_DB`, `BURNRATE_HOST`, `BURNRATE_PORT`, and
-`BURNRATE_POLL_INTERVAL` — set them before running `install.sh` and they get
+Override defaults with `BURNRATE_DB`, `BURNRATE_HOST`, `BURNRATE_PORT`,
+`BURNRATE_POLL_INTERVAL`, and `BURNRATE_PROJECTS_DIR` (the Claude Code transcript
+tree the attribution section reads, default `~/.claude/projects`) — set them before
+running `install.sh` and they get
 baked into the plist, after the same validation the app itself applies — an
 unusable port or interval falls back to the default rather than being installed
 verbatim. `BURNRATE_DB` is expanded and made absolute (relative to where you run
@@ -124,6 +126,23 @@ cover, and the scoped bucket's label is taken from the response at runtime — i
 reads "Weekly (Fable)" today and follows the account if that scope changes,
 with no code change.
 
+### No promo / adjusted-cap field is present
+
+Claude Code's `/usage` screen sometimes shows a promotional note under the weekly
+bar ("+50% weekly limits promo through …"). We checked whether the same response
+we already poll and archive carries a field for it — a promo, overage, bonus, or
+adjusted-cap value alongside the buckets. Across every archived `raw_snapshots`
+body, **it does not.** The keys that exist and were inspected are
+`omelette_promotional` (always `null`), `extra_usage` and `spend` (the paid
+overage-credit pool, not a cap boost), `limits[].group` / `limits[].is_active`,
+and the per-bucket `*_dollars` fields — none of which encode an adjusted weekly
+cap, and no weekly `percent` ever exceeds 100.
+
+So there is nothing to surface and nothing to feed the projection. The pace math
+runs against the plain 100% cap, and the hook for an adjusted cap stays **dormant
+until such a field actually appears** in the response — at which point this note
+is the place to start. We do not scrape the promo text from anywhere else.
+
 ---
 
 ## Reading the projection
@@ -185,6 +204,32 @@ stored samples. They fill in as polling continues; a fresh install starts empty.
 Hovering gives a crosshair and exact values, and the **Table view** at the bottom
 carries the same numbers for anything that does not read well as a chart.
 
+### What's burning tokens (local attribution)
+
+A separate section, fed not by the usage endpoint but by parsing Claude Code's own
+session transcripts under `~/.claude/projects/`. It answers "what is consuming
+tokens on this machine" — by project, by model, main vs subagent, and the share of
+tokens spent at large context (turns near the top of the 200k window) — all bounded
+by a 24h or 7d toggle. It also lists the **longest sessions active in the window**;
+because a session spans hours and crosses the window edge, those rows carry each
+session's duration and its **lifetime** token total (labelled as such), not a
+windowed percentage.
+
+Read this as a **proxy, not the meter.** It counts local tokens, which is not the
+same quantity the rate-limit bars above report, and the section says so on its face:
+
+> This machine only — local token counts, not the usage meter. Not other devices or
+> claude.ai.
+
+The parser is read-only and tolerant: unknown fields are ignored, malformed lines
+are skipped and counted, and a missing or half-written file never crashes a panel.
+Because the transcript tree runs to hundreds of megabytes, it is **not** re-read on
+every request — a background pass rolls new turns into SQLite (`hourly_usage`,
+`sessions_rollup`) every ~10 minutes, reading only the bytes each file has grown by
+since last time (a per-file byte-offset watermark), and the endpoint serves those
+pre-rolled aggregates. Nothing from a message body is read or stored — only token
+counts, model, working directory, session id, timestamp, and the sidechain flag.
+
 ---
 
 ## API
@@ -193,11 +238,12 @@ carries the same numbers for anything that does not read well as a chart.
 |---|---|
 | `GET /api/now` | Latest reading per bucket, `staleness_seconds`, the projection, and poller status |
 | `GET /api/history?hours=168` | Samples grouped into one series per bucket (1 ≤ hours ≤ 2160) |
+| `GET /api/attribution?window=7d` | Local token attribution over the window (`24h` or `7d`): by project, model, main-vs-subagent, the windowed large-context share, and the longest sessions active in the window (lifetime totals) |
 | `GET /api/healthz` | 200 when the last poll succeeded, 503 otherwise |
 
 Polling is every 60s, backing off exponentially to a 15-minute ceiling while
 failures persist, and resetting on the first success. Samples are kept 90 days,
-raw response bodies 14.
+raw response bodies 14, and local-attribution rollups 30.
 
 ---
 

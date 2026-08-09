@@ -37,12 +37,15 @@ const els = {
   historyBody: document.getElementById("history-body"),
   historyLabel: document.getElementById("history-label"),
   range: document.getElementById("range"),
+  attrRange: document.getElementById("attr-range"),
+  attrPanels: document.getElementById("attr-panels"),
   tooltip: document.getElementById("tooltip"),
   footerMeta: document.getElementById("footer-meta"),
 };
 
 const state = {
   hours: 168,
+  attrWindow: "7d",
   buckets: [],
   now: null,
   // The last history payload, kept so the charts can be redrawn without a fetch
@@ -105,6 +108,22 @@ function formatAge(seconds) {
   if (seconds == null) return "never";
   if (seconds < 90) return `${Math.round(seconds)}s ago`;
   return `${formatDuration(seconds)} ago`;
+}
+
+/** "1.2M" / "340k" / "820" — token counts run large, so this keeps them scannable. */
+function formatTokens(n) {
+  const value = Number(n) || 0;
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
+  return String(Math.round(value));
+}
+
+/** "62%" for a 0–1 share, "<1%" for a nonzero sliver, "0%" for nothing. */
+function formatShare(share) {
+  const value = Number(share) || 0;
+  if (value <= 0) return "0%";
+  if (value < 0.01) return "<1%";
+  return `${Math.round(value * 100)}%`;
 }
 
 function formatClock(iso) {
@@ -743,6 +762,10 @@ let appliedNow = 0;
 async function refresh({ history = true } = {}) {
   const token = ++nowRequest;
   els.page.dataset.refreshing = "true";
+  // Kicked off independently of /api/now: the attribution section reads local logs, so
+  // it must keep updating even on a poll the usage endpoint fails. Fire-and-forget with
+  // its own request-token guard.
+  refreshAttribution();
   try {
     const data = await loadNow();
     if (token <= appliedNow) return;
@@ -964,6 +987,171 @@ function renderCharts(data) {
   renderHistoryTable(series, (key) => snapshotIsCurrent && current.has(key));
 }
 
+/* ------------------------------------------------------ token attribution */
+
+/* "What's burning tokens" — local session-log attribution, a proxy for consumption
+ * and explicitly not the meter above. Fetched independently of /api/now so a failing
+ * usage endpoint never blanks it, and gated by its own request token so an out-of-order
+ * response cannot overwrite a newer one (same pattern as history). */
+
+async function loadAttribution(window) {
+  const response = await fetch(`./api/attribution?window=${encodeURIComponent(window)}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error(`/api/attribution returned HTTP ${response.status}`);
+  return response.json();
+}
+
+/* Same newest-issued starvation the /api/now path guards against: refreshAttribution
+ * is fired every tick from refresh() at a cadence as low as 5s, so a request slower
+ * than the tick has attributionRequest bumped past it before it resolves. A plain
+ * `token !== attributionRequest` check would then bail on BOTH branches and the panel
+ * would freeze empty/stale. attributionRequest is the newest ISSUED; appliedAttribution
+ * is the newest whose OUTCOME was rendered. Gating on appliedAttribution (drop only a
+ * genuinely older result) and advancing it on both success and failure lets the newest
+ * completed outcome win. Mirrors appliedNow above. */
+let attributionRequest = 0;
+let appliedAttribution = 0;
+
+async function refreshAttribution() {
+  const token = ++attributionRequest;
+  // The window this request is FOR, captured before the await so both outcomes below
+  // compare against what was actually requested rather than whatever is selected now.
+  const requested = state.attrWindow;
+  try {
+    const data = await loadAttribution(requested);
+    // The watermark orders same-window races, but not window identity: a 7d response
+    // landing after the user clicked 24h would otherwise render 7d figures under the
+    // pressed 24h button (forever, if the 24h request hangs). Drop a superseded-window
+    // response, and do NOT advance the watermark for it.
+    if (requested !== state.attrWindow) return;
+    if (token <= appliedAttribution) return;
+    appliedAttribution = token;
+    renderAttribution(data);
+  } catch (error) {
+    // A superseded window's FAILURE is the converse of the success case and must be
+    // dropped the same way -- otherwise a stale 7d failure (issued while 24h is now
+    // selected) would paint "unavailable" into the 24h panel and, since it advances the
+    // watermark, stick there if the 24h request hangs. Checked before the watermark.
+    if (requested !== state.attrWindow) return;
+    // Strict `<`, like the /api/now failure path: token === appliedAttribution here can
+    // only mean this same invocation already applied its success and then render threw,
+    // so fall through and surface the failure rather than swallowing it.
+    if (token < appliedAttribution) return;
+    appliedAttribution = token;
+    els.attrPanels.replaceChildren(
+      panel("Attribution unavailable", [
+        el("div", { class: "panel__empty", text: `Could not load local attribution: ${error.message}` }),
+      ]),
+    );
+  }
+}
+
+/** "claude-opus-4-8" → "opus-4-8": drop the vendor prefix and any date suffix. */
+function shortModel(model) {
+  return String(model || "unknown")
+    .replace(/^claude-/, "")
+    .replace(/-\d{8}$/, "");
+}
+
+function panel(title, children) {
+  return el("div", { class: "panel" }, [el("div", { class: "panel__title", text: title }), ...children]);
+}
+
+/** One ranked panel of share-proportional bars; bar width is relative to the top row. */
+function barPanel(title, rows) {
+  if (!rows.length) {
+    return panel(title, [el("div", { class: "panel__empty", text: "No usage in this window." })]);
+  }
+  const max = Math.max(...rows.map((r) => Number(r.tokens) || 0), 1);
+  return panel(
+    title,
+    rows.map((r) => {
+      const width = `${clamp(((Number(r.tokens) || 0) / max) * 100, 0, 100)}%`;
+      return el("div", { class: "bar-row" }, [
+        el("span", { class: "bar-row__label", title: r.label, text: r.label }),
+        el("span", {
+          class: "bar-row__value",
+          text: `${formatTokens(r.tokens)} · ${formatShare(r.share)}`,
+        }),
+        el("div", { class: "bar-row__track" }, [
+          el("div", { class: "bar-row__fill", style: `width:${width}` }),
+        ]),
+      ]);
+    }),
+  );
+}
+
+function statPanel(title, statText, detail) {
+  return panel(title, [
+    el("div", { class: "panel__stat", text: statText }),
+    el("p", { class: "panel__stat-detail", text: detail }),
+  ]);
+}
+
+/* Sessions cross the window boundary, so this is a descriptive list -- longest first
+ * -- not a windowed share. Each row's token figure is the session's LIFETIME total and
+ * is labelled "lifetime" inline; a note under the title says the same, so no number
+ * here can be misread as "% of the last 24h". Bar width ranks the lifetime totals. */
+function sessionsPanel(title, note, sessions) {
+  const heading = [el("div", { class: "panel__note", text: note })];
+  if (!sessions.length) {
+    return panel(title, [
+      ...heading,
+      el("div", { class: "panel__empty", text: "No sessions active in this window." }),
+    ]);
+  }
+  const max = Math.max(...sessions.map((s) => Number(s.lifetime_tokens) || 0), 1);
+  return panel(title, [
+    ...heading,
+    ...sessions.map((s) => {
+      const label = `${s.project} · ${shortModel(s.model)}`;
+      const lifetime = Number(s.lifetime_tokens) || 0;
+      const width = `${clamp((lifetime / max) * 100, 0, 100)}%`;
+      return el("div", { class: "bar-row" }, [
+        el("span", { class: "bar-row__label", title: label, text: label }),
+        el("span", {
+          class: "bar-row__value",
+          text: `${formatDuration((Number(s.duration_hours) || 0) * 3600)} · ${formatTokens(lifetime)} lifetime`,
+        }),
+        el("div", { class: "bar-row__track" }, [
+          el("div", { class: "bar-row__fill", style: `width:${width}` }),
+        ]),
+      ]);
+    }),
+  ]);
+}
+
+function renderAttribution(data) {
+  if (!data || !(Number(data.total_tokens) > 0)) {
+    els.attrPanels.replaceChildren(
+      panel("No local usage yet", [
+        el("div", {
+          class: "panel__empty",
+          text: "No token usage found in this window. The rollup refreshes within a few minutes of startup.",
+        }),
+      ]),
+    );
+    return;
+  }
+  const largeContext = data.large_context || {};
+  els.attrPanels.replaceChildren(
+    barPanel("By project", data.by_project || []),
+    barPanel("By model", data.by_model || []),
+    barPanel("Main vs subagents", data.by_agent || []),
+    statPanel(
+      "Large-context share",
+      formatShare(largeContext.share),
+      `of tokens in this window came from turns at ≥ ${formatTokens(largeContext.threshold_tokens)} context.`,
+    ),
+    sessionsPanel(
+      "Longest sessions active in this window",
+      "Duration and lifetime token total — a session may have started before this window.",
+      data.top_sessions || [],
+    ),
+  );
+}
+
 /** Names the window the charts below actually cover. */
 function historyHeading(hours) {
   if (hours % 24 === 0) {
@@ -986,6 +1174,16 @@ els.range.addEventListener("click", (event) => {
   // a screen reader announced for the whole region.
   els.historyLabel.textContent = historyHeading(state.hours);
   refreshHistory();
+});
+
+els.attrRange.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-window]");
+  if (!button) return;
+  state.attrWindow = button.dataset.window;
+  for (const other of els.attrRange.querySelectorAll("button")) {
+    other.setAttribute("aria-pressed", String(other === button));
+  }
+  refreshAttribution();
 });
 
 /* The refresh timer, rescheduled when the backend reports a different cadence than the

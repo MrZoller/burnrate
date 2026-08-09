@@ -385,6 +385,82 @@ async def test_a_failing_prune_retries_on_schedule_not_on_every_poll(store, monk
     assert calls["n"] == 1
 
 
+def _counting_aggregate(store, monkeypatch):
+    """Count attribution passes without touching the filesystem."""
+    from burnrate.store import AggregateStats
+
+    seen = {"n": 0}
+
+    def counted(root, *args, **kwargs):
+        seen["n"] += 1
+        return AggregateStats()
+
+    monkeypatch.setattr(store, "aggregate_jsonl", counted)
+    return seen
+
+
+async def test_attribution_runs_on_the_first_poll_and_is_gated_by_time(
+    store, monkeypatch, live_response, tmp_path
+):
+    _credentials(monkeypatch, "tok")
+    _fetches(monkeypatch, lambda token, n: live_response)
+    poller = Poller(store, projects_dir=tmp_path)
+    aggregated = _counting_aggregate(store, monkeypatch)
+
+    await poller.poll_once()
+    assert aggregated["n"] == 1, "the first attempt aggregates"
+
+    await poller.poll_once()
+    await poller.poll_once()
+    assert aggregated["n"] == 1, "and not again until the window elapses"
+
+    poller._last_aggregate_at -= poller_module.AGGREGATE_EVERY
+    await poller.poll_once()
+    assert aggregated["n"] == 2, "once AGGREGATE_EVERY has passed it runs again"
+
+
+async def test_attribution_runs_even_when_the_usage_fetch_fails(store, monkeypatch, tmp_path):
+    """The transcripts are local, so a broken usage endpoint must not stop attribution."""
+    _credentials(monkeypatch, "tok")
+    _fetches(monkeypatch, lambda token, n: {"nothing": "usable"})
+    poller = Poller(store, projects_dir=tmp_path)
+    aggregated = _counting_aggregate(store, monkeypatch)
+
+    await poller.poll_once()
+
+    assert poller.status.consecutive_failures == 1
+    assert aggregated["n"] == 1
+
+
+async def test_a_failing_aggregation_never_kills_the_poll_loop(
+    store, monkeypatch, live_response, tmp_path
+):
+    _credentials(monkeypatch, "tok")
+    _fetches(monkeypatch, lambda token, n: live_response)
+    poller = Poller(store, projects_dir=tmp_path)
+
+    def boom(*a, **k):
+        raise RuntimeError("corrupt transcript tree")
+
+    monkeypatch.setattr(store, "aggregate_jsonl", boom)
+
+    snapshot = await poller.poll_once()
+
+    assert snapshot is not None, "the usage poll still succeeds despite the aggregation error"
+    assert poller.status.healthy
+
+
+async def test_attribution_is_disabled_without_a_projects_dir(store, monkeypatch, live_response):
+    _credentials(monkeypatch, "tok")
+    _fetches(monkeypatch, lambda token, n: live_response)
+    poller = Poller(store)  # no projects_dir
+    aggregated = _counting_aggregate(store, monkeypatch)
+
+    await poller.poll_once()
+
+    assert aggregated["n"] == 0
+
+
 async def test_a_failed_archive_does_not_replace_the_schema_diagnosis(store, monkeypatch):
     """Losing the archive copy is a footnote; the reported error must still be
     the schema break, not a database complaint about storing it."""
@@ -1025,3 +1101,31 @@ async def test_a_non_429_failure_clears_a_prior_retry_after(store, monkeypatch):
     assert poller._retry_after_seconds is None
     assert poller.status.consecutive_failures == 2
     assert poller.next_delay() == 120.0  # pure exponential for two failures
+
+
+async def test_the_reading_is_stamped_after_aggregation(
+    store, monkeypatch, live_response, tmp_path
+):
+    """Codex #2: last_success_at is the fetch time captured AFTER aggregation, not the
+    poll-start time. Reusing poll-start `now` charged a multi-minute first scan to
+    freshness, so a just-fetched sample read stale. last_attempt_at keeps the start."""
+    import time
+
+    from burnrate.store import AggregateStats
+
+    _credentials(monkeypatch, "tok")
+    _fetches(monkeypatch, lambda token, n: live_response)
+    finished: dict[str, datetime] = {}
+
+    def slow_aggregate(root, *args, **kwargs):
+        time.sleep(0.05)  # stand in for a long first scan
+        finished["at"] = datetime.now(UTC)
+        return AggregateStats()
+
+    monkeypatch.setattr(store, "aggregate_jsonl", slow_aggregate)
+    poller = Poller(store, projects_dir=tmp_path)
+
+    await poller.poll_once()
+
+    assert poller.status.last_attempt_at < finished["at"], "the attempt is stamped before the scan"
+    assert poller.status.last_success_at >= finished["at"], "the sample is stamped after the scan"

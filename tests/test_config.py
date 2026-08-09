@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from burnrate.config import (
+    DEFAULT_ATTRIBUTION_DIR,
     DEFAULT_DB_PATH,
     DEFAULT_HOST,
     DEFAULT_PORT,
@@ -21,7 +22,13 @@ from burnrate.config import (
 
 
 def test_defaults_when_nothing_is_set(monkeypatch):
-    for name in ("BURNRATE_DB", "BURNRATE_HOST", "BURNRATE_PORT", "BURNRATE_POLL_INTERVAL"):
+    for name in (
+        "BURNRATE_DB",
+        "BURNRATE_HOST",
+        "BURNRATE_PORT",
+        "BURNRATE_POLL_INTERVAL",
+        "BURNRATE_PROJECTS_DIR",
+    ):
         monkeypatch.delenv(name, raising=False)
 
     config = Config.from_env()
@@ -30,6 +37,8 @@ def test_defaults_when_nothing_is_set(monkeypatch):
     assert config.port == DEFAULT_PORT
     assert config.poll_interval == 60.0
     assert config.db_path.name == "burnrate.db"
+    assert config.attribution_dir == DEFAULT_ATTRIBUTION_DIR
+    assert config.attribution_dir == Path.home() / ".claude" / "projects"
 
 
 def test_every_field_is_overridable(monkeypatch):
@@ -37,6 +46,7 @@ def test_every_field_is_overridable(monkeypatch):
     monkeypatch.setenv("BURNRATE_HOST", "127.0.0.1")
     monkeypatch.setenv("BURNRATE_PORT", "9999")
     monkeypatch.setenv("BURNRATE_POLL_INTERVAL", "15.5")
+    monkeypatch.setenv("BURNRATE_PROJECTS_DIR", "/tmp/projects")
 
     config = Config.from_env()
 
@@ -44,6 +54,28 @@ def test_every_field_is_overridable(monkeypatch):
     assert config.host == "127.0.0.1"
     assert config.port == 9999
     assert config.poll_interval == 15.5
+    assert config.attribution_dir == Path("/tmp/projects")
+
+
+def test_a_tilde_in_the_projects_dir_is_expanded(monkeypatch):
+    """Like the db path, `BURNRATE_PROJECTS_DIR` is expanduser()'d so `~` names the
+    home directory rather than a literal `~` directory next to the cwd."""
+    monkeypatch.setenv("BURNRATE_PROJECTS_DIR", "~/somewhere/projects")
+
+    attribution_dir = Config.from_env().attribution_dir
+
+    assert "~" not in str(attribution_dir)
+    assert attribution_dir == Path.home() / "somewhere" / "projects"
+
+
+@pytest.mark.parametrize("raw", ["rel/projects", "projects", "./p"])
+def test_a_relative_projects_dir_is_made_absolute(monkeypatch, raw):
+    """Same reason `BURNRATE_DB` is absolutized: a relative projects dir would resolve
+    against launchd's WorkingDirectory under the agent but against the shell's cwd in a
+    foreground run, naming two different trees for one configuration."""
+    monkeypatch.setenv("BURNRATE_PROJECTS_DIR", raw)
+
+    assert Config.from_env().attribution_dir.is_absolute()
 
 
 def test_a_tilde_in_the_db_path_is_expanded(monkeypatch):
@@ -162,17 +194,19 @@ def test_the_freshness_window_never_drops_below_the_floor():
 
 
 def test_print_effective_order_is_the_installers_contract(monkeypatch, capsys):
-    """install.sh reads these four records positionally, so a reordering here would
+    """install.sh reads these records positionally, so a reordering here would
     silently misconfigure the agent instead of failing. Pinned rather than trusted.
+    New fields (the projects dir) append at the end so earlier positions never move.
     The newline form is kept for reading by eye; the installer asks for NUL."""
     monkeypatch.setenv("BURNRATE_HOST", "127.0.0.1")
     monkeypatch.setenv("BURNRATE_PORT", "9999")
     monkeypatch.setenv("BURNRATE_POLL_INTERVAL", "15")
+    monkeypatch.setenv("BURNRATE_PROJECTS_DIR", "/tmp/projects")
 
     print_effective()
 
     lines = capsys.readouterr().out.splitlines()
-    assert lines[1:] == ["127.0.0.1", "9999", "15.0"]
+    assert lines[1:] == ["127.0.0.1", "9999", "15.0", "/tmp/projects"]
     assert Path(lines[0]).is_absolute(), "the db path comes first and is absolute"
 
 
@@ -199,11 +233,21 @@ def test_print_effective_is_runnable_as_a_module(monkeypatch):
         capture_output=True,
         text=True,
         check=False,
-        env={**os.environ, "BURNRATE_PORT": "abc", "BURNRATE_POLL_INTERVAL": "1e20"},
+        env={
+            **os.environ,
+            "BURNRATE_PORT": "abc",
+            "BURNRATE_POLL_INTERVAL": "1e20",
+            "BURNRATE_PROJECTS_DIR": "/tmp/projects",
+        },
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.splitlines()[1:] == [DEFAULT_HOST, str(DEFAULT_PORT), "60.0"]
+    assert result.stdout.splitlines()[1:] == [
+        DEFAULT_HOST,
+        str(DEFAULT_PORT),
+        "60.0",
+        "/tmp/projects",
+    ]
 
 
 def test_the_default_binding_is_lan_reachable():
@@ -222,11 +266,18 @@ def test_null_separated_output_survives_a_newline_in_the_path(monkeypatch, capsy
     monkeypatch.setenv("BURNRATE_HOST", "127.0.0.1")
     monkeypatch.setenv("BURNRATE_PORT", "9999")
     monkeypatch.setenv("BURNRATE_POLL_INTERVAL", "15")
+    monkeypatch.setenv("BURNRATE_PROJECTS_DIR", "/tmp/projects")
 
     print_effective(separator="\0")
 
     records = capsys.readouterr().out.split("\0")[:-1]
-    assert records == ["/tmp/burnrate\nwith a newline.db", "127.0.0.1", "9999", "15.0"]
+    assert records == [
+        "/tmp/burnrate\nwith a newline.db",
+        "127.0.0.1",
+        "9999",
+        "15.0",
+        "/tmp/projects",
+    ]
 
 
 def test_the_module_emits_nul_records_when_asked(monkeypatch):

@@ -1,0 +1,6 @@
+{"type":"assistant","cwd":"/home/dev/proj-x","sessionId":"m1","timestamp":"2026-08-09T12:00:00.000Z","message":{"model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":5}}}
+this is not json at all
+{"type":"assistant","message":{  broken and unterminated
+[1, 2, 3]
+42
+{"type":"assistant","cwd":"/home/dev/proj-x","sessionId":"m1","timestamp":"2026-08-09T12:01:00.000Z","message":{"model":"claude-opus-4-8","usage":{"input_tokens":7}}}

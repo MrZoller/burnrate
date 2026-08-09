@@ -17,6 +17,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -44,6 +45,17 @@ RETRY_AFTER_MAX_SECONDS = 3600.0
 # sample window overshot the same way. Six hours is far finer than either window at
 # any interval, and the work is two indexed DELETEs.
 PRUNE_EVERY = timedelta(hours=6)
+
+# Minimum spacing between local token-attribution rollups (issue #16). This is a
+# floor, not a fixed cadence: aggregation is driven from `poll_once`, so it can only
+# run when a poll runs. It is independent of the remote endpoint's OUTCOME -- it runs
+# before the fetch and a failing usage fetch never stops it -- but not of the poll
+# CADENCE: at a long poll interval, or while backoff has stretched the interval out,
+# the effective spacing is the poll interval when that exceeds this floor. At the
+# default 60s cadence that is invisible; only an unusually long interval makes the
+# rollup lag. Each pass reads only the bytes appended since last time, so ten minutes
+# is cheap after the first run.
+AGGREGATE_EVERY = timedelta(minutes=10)
 
 # Doublings past which the backoff ceiling has certainly been reached, so the
 # exponent saturates instead of growing until it overflows a float.
@@ -91,6 +103,7 @@ class Poller:
         store: Store,
         interval: float = POLL_INTERVAL_SECONDS,
         client: httpx.AsyncClient | None = None,
+        projects_dir: Path | str | None = None,
     ) -> None:
         self.store = store
         self.interval = interval
@@ -101,6 +114,9 @@ class Poller:
         self._task: asyncio.Task[None] | None = None
         self._stopping = asyncio.Event()
         self._last_prune_at: datetime | None = None
+        # None disables local attribution entirely (no projects dir configured).
+        self._projects_dir = Path(projects_dir) if projects_dir is not None else None
+        self._last_aggregate_at: datetime | None = None
         # Parsed Retry-After (seconds) from the most recent 429, consumed by the very
         # next `next_delay` and then cleared -- see `_record_failure` and `next_delay`.
         # None means "no server-set floor", the state after any success or non-429
@@ -210,6 +226,16 @@ class Poller:
         # trigger never fires, so the advertised retention applied precisely never
         # during the outage that was filling it.
         self._maybe_prune(now)
+        # Also before the fetch and regardless of its outcome: attribution reads local
+        # JSONLs, so it must keep updating even while the remote endpoint is failing.
+        await self._maybe_aggregate(now)
+
+        # The reading's own timestamp, taken AFTER aggregation and just before the fetch.
+        # A first aggregation pass can take minutes; reusing the poll-start `now` here
+        # charged that scan's duration to freshness, so a just-fetched sample read stale
+        # -- worst at startup, when the scan is longest. `now` still stamps the attempt
+        # and gates prune/aggregate; `fetched_at` stamps the sample and its success.
+        fetched_at = datetime.now(UTC)
 
         try:
             payload = await self._fetch_with_one_auth_retry()
@@ -223,7 +249,7 @@ class Poller:
             # or a 5xx -- the responses that actually explain why the dashboard went
             # quiet -- were not. The body arrives already redacted.
             if exc.body:
-                self._archive_unreadable(exc.body, now)
+                self._archive_unreadable(exc.body, fetched_at)
             self._record_failure(
                 _error_kind(exc), str(exc), retry_after_seconds=_retry_after_from(exc)
             )
@@ -240,10 +266,10 @@ class Poller:
         # exception on this path has killed the task, which is enough to stop relying
         # on having enumerated the ways.
         try:
-            snapshot = parse_usage(payload, fetched_at=now)
+            snapshot = parse_usage(payload, fetched_at=fetched_at)
         except Exception as exc:  # noqa: BLE001 - the loop outliving this is the point
             logger.exception("parser raised on a response")
-            self._archive_unreadable(payload, now)
+            self._archive_unreadable(payload, fetched_at)
             self._record_failure("schema", f"parser error: {type(exc).__name__}: {exc}")
             return None
 
@@ -252,7 +278,7 @@ class Poller:
             # body on the way past: this is precisely the response the raw
             # archive exists for, and it is the only kind that never reached it,
             # since the sample-writing path below is what normally records one.
-            self._archive_unreadable(payload, now)
+            self._archive_unreadable(payload, fetched_at)
             self._record_failure(
                 "schema",
                 "; ".join(snapshot.warnings) or "response contained no usable buckets",
@@ -268,7 +294,7 @@ class Poller:
             return None
 
         self.snapshot = snapshot
-        self.status.last_success_at = now
+        self.status.last_success_at = fetched_at
         self.status.last_error = None
         self.status.last_error_kind = None
         self.status.consecutive_failures = 0
@@ -291,6 +317,39 @@ class Poller:
             self.store.prune()
         except Exception:  # noqa: BLE001 - pruning is housekeeping, not critical
             logger.exception("prune failed")
+
+    async def _maybe_aggregate(self, now: datetime) -> None:
+        """Refresh the local attribution rollup, no more often than AGGREGATE_EVERY.
+
+        Called from `poll_once`, so its real spacing is the larger of AGGREGATE_EVERY
+        and the poll interval -- there is no separate timer, and at a long interval (or
+        during backoff) the rollup is only as fresh as the last poll. It does not depend
+        on the fetch SUCCEEDING, though: it runs before the fetch and every failure path
+        still lets the next poll reach it, so a broken usage endpoint never freezes it.
+
+        Runs the parse and the SQLite writes on a worker thread so a large first pass
+        over the transcript tree never blocks the event loop, and swallows everything:
+        a malformed tree, a permissions error, a schema surprise -- none of it may
+        stop the poll loop. Stamped before the work so a slow or failing pass retries
+        on the schedule rather than on every single poll.
+        """
+        if self._projects_dir is None:
+            return
+        if self._last_aggregate_at is not None and now - self._last_aggregate_at < AGGREGATE_EVERY:
+            return
+        self._last_aggregate_at = now
+        try:
+            stats = await asyncio.to_thread(self.store.aggregate_jsonl, self._projects_dir)
+            if stats.files_with_new_data:
+                logger.info(
+                    "attribution: %d/%d files updated, %d turns, %d malformed lines",
+                    stats.files_with_new_data,
+                    stats.files_scanned,
+                    stats.emitted,
+                    stats.malformed,
+                )
+        except Exception:  # noqa: BLE001 - attribution must never kill polling
+            logger.exception("attribution aggregation failed")
 
     def _archive_unreadable(self, body: Any, ts: datetime) -> None:
         """Keep the body that broke the parser, without letting that failure win.
