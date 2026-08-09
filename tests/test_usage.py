@@ -484,3 +484,40 @@ def test_fetched_at_is_carried_onto_the_snapshot(live_response):
     moment = datetime(2026, 8, 8, 21, 45, tzinfo=UTC)
 
     assert parse_usage(live_response, fetched_at=moment).fetched_at == moment
+
+
+@pytest.mark.parametrize("huge", [10**400, -(10**400), 10**309])
+def test_an_integer_too_large_for_a_float_is_refused_not_raised(huge):
+    """Regression: a decoded JSON integer has no width limit, so float(10**400)
+    raises OverflowError rather than returning inf. That escaped parse_usage -- which
+    poll_once calls outside its fetch handler -- and killed the poll task, so one
+    malformed response ended all polling instead of raising a schema warning."""
+    snapshot = parse_usage({"five_hour": {"utilization": 12}, "seven_day": {"utilization": huge}})
+
+    assert {b.key for b in snapshot.buckets} == {"five_hour"}
+    assert any("seven_day" in w for w in snapshot.warnings), snapshot.warnings
+
+
+def test_parse_usage_never_raises_on_an_oversized_number():
+    """The property the crash violated, stated directly."""
+    parse_usage({"limits": [{"kind": "session", "percent": 10**400}]})
+    parse_usage({"five_hour": {"utilization": 10**400, "resets_at": None}})
+
+
+def test_a_diagnostic_does_not_repeat_an_unbounded_value():
+    """Warnings reach /api/now and the log, and the values they quote come from the
+    response -- so their length is the endpoint's choice. A 400-digit integer was
+    reproduced in full in both places."""
+    snapshot = parse_usage(
+        {"five_hour": {"utilization": 12}, "seven_day": {"utilization": 10**400}}
+    )
+
+    warning = next(w for w in snapshot.warnings if "seven_day" in w)
+    assert len(warning) < 200, warning
+    assert "chars)" in warning
+
+
+def test_a_short_value_is_still_quoted_in_full():
+    snapshot = parse_usage({"five_hour": {"utilization": "abc"}})
+
+    assert "'abc'" in " ".join(snapshot.warnings)

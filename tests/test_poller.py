@@ -15,6 +15,7 @@ from burnrate.client import (
 from burnrate.credentials import Credential, CredentialError
 from burnrate.poller import MAX_BACKOFF_SECONDS, Poller
 from burnrate.store import Store
+from burnrate.usage import parse_usage
 
 
 @pytest.fixture
@@ -624,3 +625,51 @@ async def test_the_error_message_never_contains_the_token(store, monkeypatch):
 
     assert secret not in (poller.status.last_error or "")
     assert secret not in str(poller.status.as_dict())
+
+
+async def test_a_parser_crash_does_not_end_polling(store, monkeypatch, live_response):
+    """Third time an unhandled exception on this path has killed the task. parse_usage
+    is written never to raise and a float conversion still found a way, so the call is
+    guarded: a response the parser cannot handle costs one poll, not every future one."""
+    _credentials(monkeypatch, "tok")
+    calls = {"n": 0}
+
+    def handler(token, n):
+        calls["n"] += 1
+        return {"five_hour": {"utilization": 30}} if calls["n"] > 1 else {"boom": True}
+
+    _fetches(monkeypatch, handler)
+
+    def exploding_parse(payload, fetched_at=None):
+        if "boom" in payload:
+            raise RuntimeError("parser blew up")
+        return parse_usage(payload, fetched_at=fetched_at)
+
+    monkeypatch.setattr(poller_module, "parse_usage", exploding_parse)
+    poller = Poller(store)
+
+    assert await poller.poll_once() is None
+    assert poller.status.last_error_kind == "schema"
+    assert "parser blew up" in poller.status.last_error
+
+    # The loop survives, so the next poll succeeds.
+    assert await poller.poll_once() is not None
+    assert poller.status.healthy
+
+
+async def test_a_recorded_failure_is_scrubbed(store, monkeypatch):
+    """`last_error` is served by /api/now and written to the log, and these messages
+    are built from exception text -- which quotes whatever the exception choked on."""
+    _credentials(monkeypatch, "tok")
+    token = "sk-ant-oat01-a-real-looking-token-abc123"
+
+    def handler(token_, n):
+        raise UsageTransportError(f"LocalProtocolError: Illegal header value b'Bearer {token}'")
+
+    _fetches(monkeypatch, handler)
+    poller = Poller(store)
+
+    await poller.poll_once()
+
+    assert token not in poller.status.last_error
+    assert "sk-ant" not in poller.status.last_error

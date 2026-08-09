@@ -22,6 +22,7 @@ import httpx
 
 from .client import UsageAuthError, UsageFetchError, fetch_usage
 from .credentials import CredentialError, read_credential
+from .redact import scrub
 from .store import Store
 from .usage import UsageSnapshot, parse_usage
 
@@ -208,7 +209,20 @@ class Poller:
             self._record_failure("unexpected", f"{type(exc).__name__}: {exc}")
             return None
 
-        snapshot = parse_usage(payload, fetched_at=now)
+        # Guarded for the same reason `_schedule_next` is: this call sits outside the
+        # fetch handler above, and `_run` does not catch either, so anything escaping
+        # the parser ends polling permanently. `parse_usage` is written never to raise
+        # and a float conversion still found a way -- three times now an unhandled
+        # exception on this path has killed the task, which is enough to stop relying
+        # on having enumerated the ways.
+        try:
+            snapshot = parse_usage(payload, fetched_at=now)
+        except Exception as exc:  # noqa: BLE001 - the loop outliving this is the point
+            logger.exception("parser raised on a response")
+            self._archive_unreadable(payload, now)
+            self._record_failure("schema", f"parser error: {type(exc).__name__}: {exc}")
+            return None
+
         if not snapshot.buckets:
             # A 200 we cannot read is a schema break, not a success. Archive the
             # body on the way past: this is precisely the response the raw
@@ -298,6 +312,17 @@ class Poller:
             return await fetch_usage(retry.access_token, client=self._client)
 
     def _record_failure(self, kind: str, message: str) -> None:
+        """Record a failure, scrubbing on the way in.
+
+        This is the one place every error message becomes `last_error`, which
+        /api/now serves to the browser and the line below writes to the log -- two of
+        the three places the token is forbidden. The messages are built from exception
+        text, and exceptions quote what they choked on, so scrubbing here covers every
+        current path and any added later. `fetch_usage` also scrubs with the exact
+        token where it holds one, which catches an echo the pattern would miss; this
+        is the backstop for everything that does not.
+        """
+        message = scrub(message)
         self.status.consecutive_failures += 1
         self.status.last_error = message
         self.status.last_error_kind = kind

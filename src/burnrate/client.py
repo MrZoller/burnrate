@@ -108,7 +108,11 @@ async def fetch_usage(
         try:
             response = await client.get(url, headers=build_headers(access_token))
         except httpx.HTTPError as exc:
-            raise UsageTransportError(f"{type(exc).__name__}: {exc}") from exc
+            # Scrubbed with the token in hand. A credential containing a control
+            # character makes h11 reject the header and quote the offending bytes
+            # back -- "Illegal header value b'Bearer sk-ant-...'" -- and this text
+            # becomes `last_error`, which /api/now serves and the logger writes.
+            raise UsageTransportError(scrub(f"{type(exc).__name__}: {exc}", access_token)) from exc
 
         if response.status_code in (401, 403):
             raise UsageAuthError(f"HTTP {response.status_code}")
@@ -123,7 +127,7 @@ async def fetch_usage(
             return response.json()
         except ValueError as exc:
             raise UsageProtocolError(
-                f"response was not JSON: {exc}",
+                scrub(f"response was not JSON: {exc}", access_token),
                 body=_short_body(response, access_token, limit=ARCHIVE_BODY_LIMIT),
             ) from exc
     finally:

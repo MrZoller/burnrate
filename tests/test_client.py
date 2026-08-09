@@ -16,6 +16,7 @@ from burnrate.client import (
     REDACTED,
     USAGE_URL,
     UsageAuthError,
+    UsageFetchError,
     UsageHTTPError,
     UsageProtocolError,
     UsageTransportError,
@@ -235,3 +236,40 @@ async def test_a_borrowed_client_is_left_open(live_response):
 
     assert not client.is_closed, "we must not close a client we did not create"
     await client.aclose()
+
+
+async def test_a_credential_with_a_control_character_does_not_leak_into_the_error():
+    """Regression: h11 rejects such a header and quotes the offending bytes back --
+    "Illegal header value b'Bearer sk-ant-...'" -- and that text became `last_error`,
+    which /api/now serves and the logger writes. A real socket is needed: the request
+    has to reach h11, so MockTransport cannot exercise this."""
+    import http.server
+    import socketserver
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *args):
+            pass
+
+    socketserver.TCPServer.allow_reuse_address = True
+    server = socketserver.TCPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        token = f"{TOKEN}\ninjected: yes"
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            with pytest.raises(UsageFetchError) as excinfo:
+                await fetch_usage(token, client=client, url=f"http://127.0.0.1:{port}/x")
+    finally:
+        server.shutdown()
+
+    message = str(excinfo.value)
+    assert TOKEN not in message
+    assert "sk-ant" not in message
+    assert REDACTED in message

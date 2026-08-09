@@ -63,6 +63,12 @@ KIND_TO_KEY: dict[str, str] = {
 # the arithmetic downstream.
 MAX_RESET_DISTANCE = timedelta(days=3650)
 
+# Longest a value may be when quoted back in a diagnostic. Warnings reach /api/now and
+# the log, and the values they quote come from the response, so their length is the
+# endpoint's choice rather than ours: a 400-digit integer or a long string would
+# otherwise be reproduced in full in both places.
+MAX_QUOTED_VALUE = 80
+
 SESSION_GROUP = "session"
 WEEKLY_GROUP = "weekly"
 OTHER_GROUP = "other"
@@ -321,6 +327,14 @@ def _scope_model_name(scope: Any) -> str | None:
     return None
 
 
+def _quote(raw: Any) -> str:
+    """A value repeated back in a diagnostic, bounded in length."""
+    text = repr(raw)
+    if len(text) <= MAX_QUOTED_VALUE:
+        return text
+    return f"{text[:MAX_QUOTED_VALUE]}... ({len(text)} chars)"
+
+
 def _read_percent(container: dict[str, Any], *names: str) -> tuple[float | None, str | None]:
     """First readable percentage among `names`. Returns (value, warning).
 
@@ -337,21 +351,25 @@ def _read_percent(container: dict[str, Any], *names: str) -> tuple[float | None,
         if value is not None:
             return value, None
     name, raw = present[0]
-    return None, f"unreadable {name} {raw!r}"
+    return None, f"unreadable {name} {_quote(raw)}"
 
 
 def _as_percent(raw: Any) -> float | None:
     """Coerce a utilization/percent field to a float in [0, 100]."""
     if isinstance(raw, bool) or raw is None:
         return None
-    if isinstance(raw, int | float):
-        value = float(raw)
-    elif isinstance(raw, str):
-        try:
+    # OverflowError as well as ValueError: a decoded JSON integer has no width limit,
+    # so float(10**400) raises rather than returning inf. That escaped parse_usage,
+    # which poll_once calls outside its handler, and killed the poll task outright --
+    # one malformed response ending all polling instead of raising a schema warning.
+    try:
+        if isinstance(raw, int | float):
+            value = float(raw)
+        elif isinstance(raw, str):
             value = float(raw.strip().rstrip("%"))
-        except ValueError:
+        else:
             return None
-    else:
+    except (ValueError, OverflowError):
         return None
     # Finite, not merely non-NaN. An infinity survives float() -- from a literal
     # Infinity or from an overflowing string like "1e999" -- and the clamp below
@@ -382,10 +400,10 @@ def _parse_timestamp(raw: Any) -> tuple[datetime | None, str | None]:
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
-        return None, f"unparseable resets_at {raw!r}"
+        return None, f"unparseable resets_at {_quote(raw)}"
     parsed = parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
     if abs(parsed - datetime.now(UTC)) > MAX_RESET_DISTANCE:
-        return None, f"resets_at {raw!r} is implausibly far from now"
+        return None, f"resets_at {_quote(raw)} is implausibly far from now"
     return parsed, None
 
 
