@@ -22,7 +22,7 @@ import httpx
 
 from .client import UsageAuthError, UsageFetchError, fetch_usage
 from .credentials import CredentialError, read_credential
-from .redact import scrub
+from .redact import scrub, scrub_json
 from .store import Store
 from .usage import UsageSnapshot, parse_usage
 
@@ -296,17 +296,34 @@ class Poller:
         their blocking SQLite reads for exactly this reason; blocking the loop from
         the background task undid that, and every API and static request froze with
         it while the credential read was ultimately going to succeed from the file.
+
+        The payload comes back already scrubbed of the exact token, and it is scrubbed
+        HERE because this is the only place that holds one -- so the secret never has to
+        travel further to make the guarantee hold. Everything downstream (the parser,
+        its warnings, the bucket fields, the raw archive) then works on text the
+        credential cannot be in.
+
+        The pattern-based scrub those layers still apply is a backstop, not the
+        guarantee. It only recognises `sk-ant-...`, while `parse_credentials_json`
+        accepts any non-empty string on purpose -- Claude Code owns the credential's
+        format and lifecycle, and refusing a shape we do not recognise would mean a
+        future token stops this dashboard dead. So the pattern cannot be what protects
+        us; the exact token has to be.
         """
         credential = await asyncio.to_thread(read_credential)
         self.status.credential_source = credential.source
         try:
-            return await fetch_usage(credential.access_token, client=self._client)
+            payload = await fetch_usage(credential.access_token, client=self._client)
         except UsageAuthError as exc:
             retry = await asyncio.to_thread(read_credential)
             self.status.credential_source = retry.source
             if retry.access_token == credential.access_token:
                 raise _unchanged_credential_error(exc) from None
-            return await fetch_usage(retry.access_token, client=self._client)
+            return scrub_json(
+                await fetch_usage(retry.access_token, client=self._client),
+                retry.access_token,
+            )
+        return scrub_json(payload, credential.access_token)
 
     def _record_failure(self, kind: str, message: str) -> None:
         """Record a failure, scrubbing on the way in.

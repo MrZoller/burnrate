@@ -754,3 +754,98 @@ async def test_the_replacement_auth_error_keeps_the_status_and_the_body(store, m
 
     assert "policy" in bodies[0]
     assert "HTTP 403" in poller.status.last_error
+
+
+UNPATTERNED_TOKEN = "eyJhbGciOiJIUzI1NiJ9.a-format-the-pattern-cannot-match.sig"
+
+
+@pytest.mark.parametrize(
+    "payload_for",
+    [
+        pytest.param(
+            lambda t: {"five_hour": {"utilization": 30}, "debug": {"echo": t}}, id="value"
+        ),
+        pytest.param(lambda t: {"five_hour": {"utilization": 30}, t: {"utilization": 5}}, id="key"),
+        pytest.param(
+            lambda t: {"five_hour": {"utilization": 30}, "d": {"list": ["a", t]}}, id="nested"
+        ),
+        pytest.param(lambda t: {"five_hour": {"utilization": t}}, id="malformed-utilization"),
+    ],
+)
+async def test_a_token_the_pattern_cannot_match_is_still_scrubbed(store, monkeypatch, payload_for):
+    """The redaction guarantee has to be absolute, not heuristic. `scrub` only knows
+    `sk-ant-...`, while `parse_credentials_json` accepts any non-empty string on purpose
+    -- Claude Code owns the credential's format, and refusing an unrecognised shape would
+    mean a future token stops this dashboard dead. So the exact token has to do the work,
+    which means scrubbing where it is held rather than downstream."""
+    monkeypatch.setattr(
+        poller_module,
+        "read_credential",
+        lambda: Credential(access_token=UNPATTERNED_TOKEN, source="file"),
+    )
+    _fetches(monkeypatch, lambda token, n: payload_for(token))
+    poller = Poller(store)
+
+    snapshot = await poller.poll_once()
+
+    assert UNPATTERNED_TOKEN not in str(store.path.read_bytes())
+    with store._connect() as conn:
+        archived = " ".join(r["body"] for r in conn.execute("SELECT body FROM raw_snapshots"))
+    rendered = " ".join(
+        [
+            archived,
+            *(snapshot.warnings if snapshot else ()),
+            *(snapshot.notices if snapshot else ()),
+            *((b.key for b in snapshot.buckets) if snapshot else ()),
+            *((b.label for b in snapshot.buckets) if snapshot else ()),
+        ]
+    )
+    assert UNPATTERNED_TOKEN not in rendered
+
+
+async def test_the_rotated_token_is_scrubbed_on_the_retry_path_too(
+    store, monkeypatch, live_response
+):
+    """The 401 re-read fetches with a different credential, so that branch needs the
+    same treatment -- it is a second call site, which is exactly how these get missed."""
+    tokens = iter([UNPATTERNED_TOKEN, UNPATTERNED_TOKEN + "-rotated"])
+    seen = []
+
+    def read():
+        value = next(tokens, UNPATTERNED_TOKEN + "-rotated")
+        seen.append(value)
+        return Credential(access_token=value, source="file")
+
+    monkeypatch.setattr(poller_module, "read_credential", read)
+
+    def handler(token, n):
+        if n == 1:
+            raise UsageAuthError("HTTP 401", status_code=401)
+        return {"five_hour": {"utilization": 30}, "debug": {"echo": token}}
+
+    _fetches(monkeypatch, handler)
+    poller = Poller(store)
+
+    await poller.poll_once()
+
+    with store._connect() as conn:
+        archived = " ".join(r["body"] for r in conn.execute("SELECT body FROM raw_snapshots"))
+    assert seen[-1] not in archived
+    assert "<redacted>" in archived
+
+
+async def test_an_ordinary_payload_is_unchanged_by_the_scrub(store, monkeypatch, live_response):
+    """It runs on every successful poll, so it must be a no-op on real data."""
+    _credentials(monkeypatch, "sk-ant-oat01-tok")
+    _fetches(monkeypatch, lambda token, n: live_response)
+    poller = Poller(store)
+
+    snapshot = await poller.poll_once()
+
+    assert [b.key for b in snapshot.buckets] == [
+        "five_hour",
+        "seven_day",
+        "seven_day_fable",
+        "nimbus_quill",
+    ]
+    assert snapshot.warnings == ()

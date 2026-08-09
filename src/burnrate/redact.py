@@ -6,10 +6,16 @@ excerpt, an archived response body -- so the rule lives here rather than being
 restated at each of them. One definition, one set of tests, and a single place to
 change when the credential format does.
 
-Scrubbing is a backstop, not the primary defence. Nothing here deliberately
-handles the token; this exists for the case where an upstream response contains
-it because a future field echoes it back, which is exactly the kind of surprise
-the raw archive is designed to capture and would otherwise persist verbatim.
+Two strengths, and the difference matters. Called WITH the exact token -- which the
+poller does, at the one point that holds one -- this is a guarantee: the credential
+cannot survive whatever format it happens to be in. Called without, the pattern is a
+heuristic that only recognises `sk-ant-...`, and `parse_credentials_json` accepts any
+non-empty string on purpose, since Claude Code owns the credential's format and
+refusing an unrecognised shape would mean a future token stops the dashboard dead.
+
+So the pattern is the backstop -- for a credential we never held, echoed back by some
+future field -- and the exact token is the defence. A layer that only pattern-scrubs is
+relying on the backstop, which is worth knowing before adding one.
 """
 
 from __future__ import annotations
