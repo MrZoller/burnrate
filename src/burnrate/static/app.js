@@ -28,6 +28,7 @@ const els = {
   charts: document.getElementById("charts"),
   tableBody: document.getElementById("table-body"),
   historyBody: document.getElementById("history-body"),
+  historyLabel: document.getElementById("history-label"),
   range: document.getElementById("range"),
   tooltip: document.getElementById("tooltip"),
   footerMeta: document.getElementById("footer-meta"),
@@ -798,6 +799,15 @@ function renderCharts(data) {
   renderHistoryTable(series, (key) => snapshotIsCurrent && current.has(key));
 }
 
+/** Names the window the charts below actually cover. */
+function historyHeading(hours) {
+  if (hours % 24 === 0) {
+    const days = hours / 24;
+    return days === 1 ? "Last 24 hours" : `Last ${days} days`;
+  }
+  return `Last ${hours} hours`;
+}
+
 els.range.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-hours]");
   if (!button) return;
@@ -805,6 +815,11 @@ els.range.addEventListener("click", (event) => {
   for (const other of els.range.querySelectorAll("button")) {
     other.setAttribute("aria-pressed", String(other === button));
   }
+  // The heading was written into the markup as "Last 7 days" and never touched
+  // again, so selecting 24h left it contradicting the charts and the table beside
+  // it. It is also this section's accessible name, so the wrong text was the label
+  // a screen reader announced for the whole region.
+  els.historyLabel.textContent = historyHeading(state.hours);
   refreshHistory();
 });
 

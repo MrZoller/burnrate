@@ -118,6 +118,24 @@ for _ in $(seq 1 20); do
 done
 
 printf '\n'
-printf 'Serving, but the first poll has not succeeded yet.\n'
-printf 'This is expected on the very first run if macOS is waiting on a keychain\n'
-printf 'prompt. Check the dashboard banner and: tail -f %s\n' "$LOG"
+# The loop above uses `curl -f`, which fails on the health check's own 503 as well
+# as on a refused connection -- exit 22 versus 7, and the boolean test cannot tell
+# them apart. So "serving but not yet polling" and "never started at all" reached
+# the same message, and an agent that could not bind its port was reported as
+# waiting on a keychain prompt. One probe without -f separates them: any HTTP reply
+# means something is listening.
+if curl -sS -o /dev/null --max-time 2 "$PROBE_URL/api/healthz" >/dev/null 2>&1; then
+  printf 'Serving, but the first poll has not succeeded yet.\n'
+  printf 'This is expected on the very first run if macOS is waiting on a keychain\n'
+  printf 'prompt. Check the dashboard banner and: tail -f %s\n' "$LOG"
+  exit 0
+fi
+
+printf 'error: nothing is listening on %s.\n' "$PROBE_URL" >&2
+printf '       The agent is loaded but not serving -- a port already in use, an\n' >&2
+printf '       address that cannot be bound, or a crash at startup.\n' >&2
+printf '\nlaunchd state:\n' >&2
+launchctl print "gui/$UID/$LABEL" 2>&1 | grep -E 'state|last exit|program' | head -5 >&2 || true
+printf '\nLast lines of %s:\n' "$LOG" >&2
+tail -5 "$LOG" 2>/dev/null >&2 || printf '  (no log yet)\n' >&2
+exit 1
