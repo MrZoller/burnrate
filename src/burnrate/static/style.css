@@ -1,0 +1,533 @@
+/* burnrate — dark-only dashboard.
+ *
+ * Palette is the validated dark instance: chart surface #1a1a19 on page plane
+ * #0d0d0d, with the reserved status trio (good/warning/critical) carrying
+ * threshold state and a single blue slot carrying the history series. Status
+ * color never travels alone — every gauge pairs it with a written state label.
+ */
+
+:root {
+  color-scheme: dark;
+
+  --plane: #0d0d0d;
+  --surface: #1a1a19;
+  --surface-raised: #212120;
+
+  --ink: #ffffff;
+  --ink-secondary: #c3c2b7;
+  --ink-muted: #898781;
+
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --border: rgba(255, 255, 255, 0.1);
+
+  --series: #3987e5;
+
+  --good: #0ca30c;
+  --warning: #fab219;
+  --critical: #d03b3b;
+
+  --radius: 14px;
+  --gap: 20px;
+
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--plane);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 32px 24px 64px;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* ---------- masthead ---------- */
+
+.masthead {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.masthead h1 {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.masthead__sub {
+  margin: 2px 0 0;
+  color: var(--ink-muted);
+  font-size: 13px;
+}
+
+.masthead__meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-secondary);
+  font-size: 13px;
+}
+
+.masthead__freshness {
+  font-variant-numeric: tabular-nums;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ink-muted);
+  flex: none;
+}
+
+.dot[data-state="live"] {
+  background: var(--good);
+  box-shadow: 0 0 0 3px rgba(12, 163, 12, 0.18);
+}
+
+.dot[data-state="stale"] {
+  background: var(--warning);
+  box-shadow: 0 0 0 3px rgba(250, 178, 25, 0.18);
+}
+
+.dot[data-state="error"] {
+  background: var(--critical);
+  box-shadow: 0 0 0 3px rgba(208, 59, 59, 0.18);
+}
+
+/* ---------- failure banner ---------- */
+
+.banner {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 14px 16px;
+  border-radius: var(--radius);
+  border: 1px solid var(--warning);
+  background: rgba(250, 178, 25, 0.08);
+}
+
+.banner[data-severity="error"] {
+  border-color: var(--critical);
+  background: rgba(208, 59, 59, 0.1);
+}
+
+.banner__icon {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--plane);
+  background: var(--warning);
+  margin-top: 1px;
+}
+
+.banner[data-severity="error"] .banner__icon {
+  background: var(--critical);
+  color: var(--ink);
+}
+
+.banner__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 14px;
+}
+
+.banner__body span {
+  color: var(--ink-secondary);
+}
+
+/* ---------- hero ---------- */
+
+.hero {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px 26px;
+}
+
+.hero__label {
+  margin: 0;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-muted);
+}
+
+.hero__value {
+  margin: 6px 0 4px;
+  font-size: 48px;
+  line-height: 1.1;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+}
+
+.hero__detail {
+  margin: 0;
+  color: var(--ink-secondary);
+  font-size: 14px;
+  max-width: 68ch;
+}
+
+.hero[data-status="clears_reset"] .hero__value {
+  color: var(--good);
+}
+
+.hero[data-status="projected"] .hero__value {
+  color: var(--warning);
+}
+
+.hero[data-status="at_cap"] .hero__value {
+  color: var(--critical);
+}
+
+/* ---------- sections ---------- */
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.section-title {
+  margin: 0 0 12px;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-muted);
+}
+
+.section-head .section-title {
+  margin: 0;
+}
+
+.range {
+  display: flex;
+  gap: 2px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 2px;
+}
+
+.range button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ink-secondary);
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 11px;
+  border-radius: 7px;
+  cursor: pointer;
+  min-height: 26px;
+}
+
+.range button:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--ink);
+}
+
+.range button[aria-pressed="true"] {
+  background: var(--surface-raised);
+  color: var(--ink);
+}
+
+.range button:focus-visible,
+.table-view summary:focus-visible {
+  outline: 2px solid var(--series);
+  outline-offset: 2px;
+}
+
+/* ---------- gauges ---------- */
+
+.gauges {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: var(--gap);
+}
+
+.gauge {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px 18px 18px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.gauge--unknown {
+  border-style: dashed;
+}
+
+.gauge__label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-secondary);
+}
+
+.gauge__dial {
+  position: relative;
+  width: 100%;
+  max-width: 168px;
+}
+
+.gauge__readout {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding-top: 6px;
+  pointer-events: none;
+}
+
+.gauge__pct {
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+}
+
+.gauge__state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--ink-secondary);
+}
+
+.gauge__state::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: currentColor;
+}
+
+.gauge__countdown {
+  font-size: 12px;
+  color: var(--ink-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.gauge__note {
+  font-size: 11px;
+  color: var(--ink-muted);
+}
+
+/* ---------- charts ---------- */
+
+.charts {
+  display: grid;
+  gap: var(--gap);
+}
+
+.chart {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px 12px;
+}
+
+.chart__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.chart__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-secondary);
+}
+
+.chart__now {
+  font-size: 12px;
+  color: var(--ink-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A bucket the API no longer reports. The label already spells out the age in
+   words, so this only reinforces it -- never carries the meaning alone. */
+.chart__now--past {
+  font-style: italic;
+  opacity: 0.75;
+}
+
+.chart svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.chart__empty {
+  color: var(--ink-muted);
+  font-size: 13px;
+  padding: 18px 0 10px;
+}
+
+/* ---------- tooltip ---------- */
+
+.tooltip {
+  position: fixed;
+  z-index: 20;
+  pointer-events: none;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ink);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  white-space: nowrap;
+}
+
+.tooltip b {
+  font-variant-numeric: tabular-nums;
+}
+
+.tooltip span {
+  color: var(--ink-muted);
+}
+
+/* ---------- table view ---------- */
+
+.table-view {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+}
+
+.table-view summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--ink-secondary);
+  font-weight: 600;
+}
+
+.table-scroll {
+  overflow-x: auto;
+  margin-top: 12px;
+}
+
+/* Says so, rather than leaving a header over nothing. */
+.table__empty {
+  color: var(--ink-muted);
+  font-style: italic;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 8px 12px 8px 0;
+  border-bottom: 1px solid var(--grid);
+  white-space: nowrap;
+}
+
+th {
+  color: var(--ink-muted);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+td {
+  color: var(--ink-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+td:first-child {
+  color: var(--ink);
+}
+
+/* ---------- footer ---------- */
+
+.footer {
+  border-top: 1px solid var(--grid);
+  padding-top: 16px;
+  color: var(--ink-muted);
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.footer p {
+  margin: 0;
+  max-width: 76ch;
+}
+
+.footer code {
+  font-size: 11px;
+  background: var(--surface);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+/* Refetches hold the previous render rather than flashing a skeleton. */
+.page[data-refreshing="true"] .gauges,
+.page[data-refreshing="true"] .charts {
+  opacity: 0.72;
+  transition: opacity 120ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+  }
+}
