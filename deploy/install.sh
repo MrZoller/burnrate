@@ -14,6 +14,61 @@ LOG="$HOME/Library/Logs/burnrate.log"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 
+# An IPv6 literal needs brackets in a URL; a hostname or IPv4 address must not
+# have them. A colon is what separates the two cases.
+url_for() { case "$1" in *:*) printf 'http://[%s]:%s' "$1" "$PORT" ;; *) printf 'http://%s:%s' "$1" "$PORT" ;; esac; }
+
+# Classify the health endpoint as one of: healthy, unhealthy, foreign, down.
+#
+# Status alone cannot answer this. `curl -f` conflates the health check's own 503
+# with a refused connection (exit 22 versus 7, both falsy), and dropping -f to
+# separate them then accepts any completed response -- so a different HTTP service
+# occupying this port passed for burnrate. Neither form is enough on its own: a
+# catch-all 200 satisfies the -f test, and a 404 satisfies the other. So the body is
+# checked for a field only our health endpoint emits, and the status is then read for
+# what it means rather than merely for having arrived.
+probe_health() {
+  local response code body
+  # --noproxy '*' because this is a local check of a listener we just started. With
+  # http_proxy or ALL_PROXY set and the bind address absent from NO_PROXY, curl sent
+  # the request to the proxy instead: a healthy agent then timed out as "down", or the
+  # proxy's own reply was classified as "foreign". Measured -- with ALL_PROXY pointing
+  # at a closed port the probe returned 000, and --noproxy restored the 200.
+  response=$(curl -sS --noproxy '*' --max-time 2 -w '\n%{http_code}' \
+    "$PROBE_URL/api/healthz" 2>/dev/null) || { printf 'down'; return; }
+  code=${response##*$'\n'}
+  body=${response%$'\n'*}
+  case "$body" in
+    *'"poller_healthy"'*) ;;
+    *) printf 'foreign'; return ;;
+  esac
+  case "$code" in
+    200) printf 'healthy' ;;
+    503) printf 'unhealthy' ;;
+    *) printf 'foreign' ;;
+  esac
+}
+
+report_not_ours() {
+  printf 'error: something other than burnrate is serving on %s.\n' "$PROBE_URL" >&2
+  printf '       The port is already in use, so the agent could not bind it.\n' >&2
+  printf '       Free the port, or reinstall with BURNRATE_PORT set to another one.\n' >&2
+}
+
+report_dead() {
+  printf 'error: nothing is listening on %s.\n' "$PROBE_URL" >&2
+  printf '       The agent is loaded but not serving -- an address that cannot be\n' >&2
+  printf '       bound, or a crash at startup.\n' >&2
+  printf '\nlaunchd state:\n' >&2
+  launchctl print "gui/$UID/$LABEL" 2>&1 | grep -E 'state|last exit|program' | head -5 >&2 || true
+  printf '\nLast lines of %s:\n' "$LOG" >&2
+  tail -5 "$LOG" 2>/dev/null >&2 || printf '  (no log yet)\n' >&2
+}
+
+# Everything above is a definition; nothing here touches the system until main runs.
+# Sourcing this file (as the tests do) therefore defines probe_health/url_for without
+# performing an install; the guard at the end runs main only on direct execution.
+main() {
 [ "$(uname -s)" = "Darwin" ] || die "launchd is macOS-only; run 'uv run burnrate' directly elsewhere"
 [ -f "$PLIST_SRC" ] || die "missing template: $PLIST_SRC"
 
@@ -102,9 +157,6 @@ case "$HOST" in
     ADVERTISE="$HOST"
     ;;
 esac
-# An IPv6 literal needs brackets in a URL; a hostname or IPv4 address must not
-# have them. A colon is what separates the two cases.
-url_for() { case "$1" in *:*) printf 'http://[%s]:%s' "$1" "$PORT" ;; *) printf 'http://%s:%s' "$1" "$PORT" ;; esac; }
 PROBE_URL="$(url_for "$PROBE")"
 PUBLIC_URL="$(url_for "$ADVERTISE")"
 
@@ -114,53 +166,6 @@ printf '  db    : %s\n' "$DB"
 printf '  poll  : every %ss\n' "$INTERVAL"
 printf '  log   : %s\n' "$LOG"
 printf '  url   : %s/\n' "$PUBLIC_URL"
-
-# Classify the health endpoint as one of: healthy, unhealthy, foreign, down.
-#
-# Status alone cannot answer this. `curl -f` conflates the health check's own 503
-# with a refused connection (exit 22 versus 7, both falsy), and dropping -f to
-# separate them then accepts any completed response -- so a different HTTP service
-# occupying this port passed for burnrate. Neither form is enough on its own: a
-# catch-all 200 satisfies the -f test, and a 404 satisfies the other. So the body is
-# checked for a field only our health endpoint emits, and the status is then read for
-# what it means rather than merely for having arrived.
-probe_health() {
-  local response code body
-  # --noproxy '*' because this is a local check of a listener we just started. With
-  # http_proxy or ALL_PROXY set and the bind address absent from NO_PROXY, curl sent
-  # the request to the proxy instead: a healthy agent then timed out as "down", or the
-  # proxy's own reply was classified as "foreign". Measured -- with ALL_PROXY pointing
-  # at a closed port the probe returned 000, and --noproxy restored the 200.
-  response=$(curl -sS --noproxy '*' --max-time 2 -w '\n%{http_code}' \
-    "$PROBE_URL/api/healthz" 2>/dev/null) || { printf 'down'; return; }
-  code=${response##*$'\n'}
-  body=${response%$'\n'*}
-  case "$body" in
-    *'"poller_healthy"'*) ;;
-    *) printf 'foreign'; return ;;
-  esac
-  case "$code" in
-    200) printf 'healthy' ;;
-    503) printf 'unhealthy' ;;
-    *) printf 'foreign' ;;
-  esac
-}
-
-report_not_ours() {
-  printf 'error: something other than burnrate is serving on %s.\n' "$PROBE_URL" >&2
-  printf '       The port is already in use, so the agent could not bind it.\n' >&2
-  printf '       Free the port, or reinstall with BURNRATE_PORT set to another one.\n' >&2
-}
-
-report_dead() {
-  printf 'error: nothing is listening on %s.\n' "$PROBE_URL" >&2
-  printf '       The agent is loaded but not serving -- an address that cannot be\n' >&2
-  printf '       bound, or a crash at startup.\n' >&2
-  printf '\nlaunchd state:\n' >&2
-  launchctl print "gui/$UID/$LABEL" 2>&1 | grep -E 'state|last exit|program' | head -5 >&2 || true
-  printf '\nLast lines of %s:\n' "$LOG" >&2
-  tail -5 "$LOG" 2>/dev/null >&2 || printf '  (no log yet)\n' >&2
-}
 
 printf '\nWaiting for the first poll'
 for _ in $(seq 1 20); do
@@ -200,3 +205,11 @@ esac
 
 report_dead
 exit 1
+}
+
+# Run the installer only when executed directly. When sourced (the tests do this to
+# reach probe_health/url_for), $0 is the sourcing shell, not this file, so main is
+# skipped and nothing is installed.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  main "$@"
+fi
