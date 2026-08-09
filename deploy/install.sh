@@ -42,7 +42,16 @@ fi
 # comes back here has to be baked into the plist or it is simply absent at runtime.
 EFFECTIVE=$("$PYTHON" -m burnrate.config) \
   || die "could not read the effective configuration"
-{ read -r DB; read -r HOST; read -r PORT; read -r INTERVAL; } <<EOF
+# IFS= on every read, or the shell strips leading and trailing whitespace from each
+# line. A path legitimately ending in a space would then differ between the plist and
+# a foreground run using the same environment -- which defeats the point of taking
+# these values from the package in the first place.
+{
+  IFS= read -r DB
+  IFS= read -r HOST
+  IFS= read -r PORT
+  IFS= read -r INTERVAL
+} <<EOF
 $EFFECTIVE
 EOF
 [ -n "$DB" ] && [ -n "$HOST" ] && [ -n "$PORT" ] && [ -n "$INTERVAL" ] \
@@ -107,35 +116,83 @@ printf '  poll  : every %ss\n' "$INTERVAL"
 printf '  log   : %s\n' "$LOG"
 printf '  url   : %s/\n' "$PUBLIC_URL"
 
+# Classify the health endpoint as one of: healthy, unhealthy, foreign, down.
+#
+# Status alone cannot answer this. `curl -f` conflates the health check's own 503
+# with a refused connection (exit 22 versus 7, both falsy), and dropping -f to
+# separate them then accepts any completed response -- so a different HTTP service
+# occupying this port passed for burnrate. Neither form is enough on its own: a
+# catch-all 200 satisfies the -f test, and a 404 satisfies the other. So the body is
+# checked for a field only our health endpoint emits, and the status is then read for
+# what it means rather than merely for having arrived.
+probe_health() {
+  local response code body
+  response=$(curl -sS --max-time 2 -w '\n%{http_code}' "$PROBE_URL/api/healthz" 2>/dev/null) \
+    || { printf 'down'; return; }
+  code=${response##*$'\n'}
+  body=${response%$'\n'*}
+  case "$body" in
+    *'"poller_healthy"'*) ;;
+    *) printf 'foreign'; return ;;
+  esac
+  case "$code" in
+    200) printf 'healthy' ;;
+    503) printf 'unhealthy' ;;
+    *) printf 'foreign' ;;
+  esac
+}
+
+report_not_ours() {
+  printf 'error: something other than burnrate is serving on %s.\n' "$PROBE_URL" >&2
+  printf '       The port is already in use, so the agent could not bind it.\n' >&2
+  printf '       Free the port, or reinstall with BURNRATE_PORT set to another one.\n' >&2
+}
+
+report_dead() {
+  printf 'error: nothing is listening on %s.\n' "$PROBE_URL" >&2
+  printf '       The agent is loaded but not serving -- an address that cannot be\n' >&2
+  printf '       bound, or a crash at startup.\n' >&2
+  printf '\nlaunchd state:\n' >&2
+  launchctl print "gui/$UID/$LABEL" 2>&1 | grep -E 'state|last exit|program' | head -5 >&2 || true
+  printf '\nLast lines of %s:\n' "$LOG" >&2
+  tail -5 "$LOG" 2>/dev/null >&2 || printf '  (no log yet)\n' >&2
+}
+
 printf '\nWaiting for the first poll'
 for _ in $(seq 1 20); do
-  if curl -fsS --max-time 2 "$PROBE_URL/api/healthz" >/dev/null 2>&1; then
-    printf '\nUp and healthy.\n'
-    exit 0
-  fi
+  case "$(probe_health)" in
+    healthy)
+      printf '\nUp and healthy.\n'
+      exit 0
+      ;;
+    foreign)
+      # Waiting will not help, and this is a diagnosis worth giving immediately.
+      printf '\n'
+      report_not_ours
+      exit 1
+      ;;
+  esac
   printf '.'
   sleep 1
 done
 
 printf '\n'
-# The loop above uses `curl -f`, which fails on the health check's own 503 as well
-# as on a refused connection -- exit 22 versus 7, and the boolean test cannot tell
-# them apart. So "serving but not yet polling" and "never started at all" reached
-# the same message, and an agent that could not bind its port was reported as
-# waiting on a keychain prompt. One probe without -f separates them: any HTTP reply
-# means something is listening.
-if curl -sS -o /dev/null --max-time 2 "$PROBE_URL/api/healthz" >/dev/null 2>&1; then
-  printf 'Serving, but the first poll has not succeeded yet.\n'
-  printf 'This is expected on the very first run if macOS is waiting on a keychain\n'
-  printf 'prompt. Check the dashboard banner and: tail -f %s\n' "$LOG"
-  exit 0
-fi
+case "$(probe_health)" in
+  unhealthy)
+    printf 'Serving, but the first poll has not succeeded yet.\n'
+    printf 'This is expected on the very first run if macOS is waiting on a keychain\n'
+    printf 'prompt. Check the dashboard banner and: tail -f %s\n' "$LOG"
+    exit 0
+    ;;
+  healthy)
+    printf 'Up and healthy.\n'
+    exit 0
+    ;;
+  foreign)
+    report_not_ours
+    exit 1
+    ;;
+esac
 
-printf 'error: nothing is listening on %s.\n' "$PROBE_URL" >&2
-printf '       The agent is loaded but not serving -- a port already in use, an\n' >&2
-printf '       address that cannot be bound, or a crash at startup.\n' >&2
-printf '\nlaunchd state:\n' >&2
-launchctl print "gui/$UID/$LABEL" 2>&1 | grep -E 'state|last exit|program' | head -5 >&2 || true
-printf '\nLast lines of %s:\n' "$LOG" >&2
-tail -5 "$LOG" 2>/dev/null >&2 || printf '  (no log yet)\n' >&2
+report_dead
 exit 1
