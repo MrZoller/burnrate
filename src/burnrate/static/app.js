@@ -573,14 +573,17 @@ function attachHover(svg, ctx) {
 
 /* -------------------------------------------------------------------- table */
 
-function renderTable(buckets) {
+function renderTable(buckets, stale) {
   els.tableBody.replaceChildren(
     ...buckets.map((bucket) =>
       el("tr", {}, [
         el("td", { text: bucket.label }),
         el("td", { text: pct(bucket.utilization) }),
-        // Pace, matching the gauges -- a level word here would contradict them.
-        el("td", { text: bucket.pace_label || "Unknown" }),
+        // Pace, matching the gauges -- a level word here would contradict them. On a
+        // stale reading the present-tense verdict is an assertion about a value we
+        // know to be old, so it becomes the same neutral "Stale" the gauge shows;
+        // this is the screen-reader surface, where a confident wrong word is worst.
+        el("td", { text: stale ? "Stale" : bucket.pace_label || "Unknown" }),
         el("td", { text: bucket.resets_at ? formatClock(bucket.resets_at) : "—" }),
         el("td", { text: bucket.source || "—" }),
       ]),
@@ -746,7 +749,7 @@ async function refresh({ history = true } = {}) {
 
     renderBanner(data, null);
     renderGauges(state.buckets, data.stale === true);
-    renderTable(state.buckets);
+    renderTable(state.buckets, data.stale === true);
     renderHero(data.projection, state.buckets.find((b) => b.key === "seven_day"));
 
     // Never a confident "Updated" while the banner says stale -- that contradiction
@@ -786,8 +789,11 @@ async function refresh({ history = true } = {}) {
     if (state.now && !state.now.stale) state.now = { ...state.now, stale: true };
     // Re-render the gauges muted for the same reason the hero is redrawn below: the
     // backend just failed, so the last buckets are now of unknown age and must not keep
-    // asserting a live HEALTHY/Watch/Critical judgement over them.
+    // asserting a live pace judgement over them. The details table is the same story on
+    // the screen-reader surface -- it was never re-rendered here, so the stale forecast
+    // sat in it for the whole outage; mute it alongside the gauges.
     renderGauges(state.buckets, true);
+    renderTable(state.buckets, true);
     if (state.history) renderCharts(state.history);
     // The hero too, and it is the most important of the three: a cap time is the
     // one thing on this page a reader would act on, and the backend deliberately
