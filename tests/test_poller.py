@@ -220,6 +220,47 @@ async def test_an_undecodable_200_is_archived_too(store, monkeypatch):
     assert "Sign in to continue" in bodies[0]
 
 
+@pytest.mark.parametrize("status", [429, 500, 503])
+async def test_a_rate_limit_or_server_error_body_is_archived(store, monkeypatch, status):
+    """Regression: the archive depended on which exception type the client happened
+    to raise. An undecodable 2xx was kept; a 429 or 5xx was not -- and those are the
+    responses that explain why the dashboard went quiet."""
+    _credentials(monkeypatch, "tok")
+
+    def handler(token, n):
+        raise UsageHTTPError(status, "rate limited", body='{"error":"slow down","retry_after":42}')
+
+    _fetches(monkeypatch, handler)
+    poller = Poller(store)
+
+    assert await poller.poll_once() is None
+    assert poller.status.last_error_kind == "http"
+
+    with store._connect() as conn:
+        bodies = [row["body"] for row in conn.execute("SELECT body FROM raw_snapshots")]
+
+    assert len(bodies) == 1
+    assert "slow down" in bodies[0]
+
+
+async def test_an_error_with_no_body_archives_nothing(store, monkeypatch):
+    """A transport failure never had a response, so there is nothing to keep."""
+    _credentials(monkeypatch, "tok")
+
+    def handler(token, n):
+        raise UsageTransportError("connection refused")
+
+    _fetches(monkeypatch, handler)
+    poller = Poller(store)
+
+    await poller.poll_once()
+
+    with store._connect() as conn:
+        count = conn.execute("SELECT COUNT(*) AS n FROM raw_snapshots").fetchone()["n"]
+
+    assert count == 0
+
+
 async def test_a_protocol_error_without_a_body_archives_nothing(store, monkeypatch):
     """No body means nothing to keep -- it must not write an empty row."""
     _credentials(monkeypatch, "tok")

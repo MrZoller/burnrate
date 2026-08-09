@@ -95,6 +95,45 @@ async def test_other_http_failures_map_to_usage_http_error(status):
     assert excinfo.value.status_code == status
 
 
+@pytest.mark.parametrize("status", [429, 500, 503])
+async def test_an_http_error_carries_its_body_for_the_archive(status):
+    """Regression: only the undecodable-2xx path kept a body, so a 429 or a 5xx --
+    the responses that actually explain why the dashboard went quiet -- were the ones
+    being dropped from the archive."""
+    detail = '{"error":{"message":"rate limit exceeded","retry_after":42}}'
+    async with _client(lambda r: httpx.Response(status, text=detail)) as client:
+        with pytest.raises(UsageHTTPError) as excinfo:
+            await fetch_usage(TOKEN, client=client)
+
+    assert "rate limit exceeded" in excinfo.value.body
+    assert "retry_after" in excinfo.value.body
+
+
+async def test_an_http_error_body_is_redacted():
+    """It goes to the database like the others, so the same rules apply."""
+    leaky = f'{{"error":"bad token {TOKEN}"}}'
+    async with _client(lambda r: httpx.Response(500, text=leaky)) as client:
+        with pytest.raises(UsageHTTPError) as excinfo:
+            await fetch_usage(TOKEN, client=client)
+
+    assert TOKEN not in excinfo.value.body
+    assert "sk-ant" not in excinfo.value.body
+    assert REDACTED in excinfo.value.body
+
+
+async def test_an_error_with_no_response_carries_no_body():
+    """Nothing to archive when the request never completed."""
+
+    def handler(request):
+        raise httpx.ConnectError("connection refused")
+
+    async with _client(handler) as client:
+        with pytest.raises(UsageTransportError) as excinfo:
+            await fetch_usage(TOKEN, client=client)
+
+    assert excinfo.value.body == ""
+
+
 async def test_a_200_that_is_not_json_is_a_protocol_error():
     """A captive portal or an HTML error page must not read as usable data."""
     async with _client(lambda r: httpx.Response(200, text="<html>hello</html>")) as client:

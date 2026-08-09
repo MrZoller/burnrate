@@ -41,7 +41,17 @@ ARCHIVE_BODY_LIMIT = 4000
 
 
 class UsageFetchError(RuntimeError):
-    """Base class for a failed usage fetch."""
+    """Base class for a failed usage fetch.
+
+    `body` is a redacted archival excerpt of the response, when there was a response
+    worth keeping. The poller archives it on any subclass that carries one, so a new
+    error type gets the behaviour by setting the field rather than by someone
+    remembering to add a branch. Redacted because it is written to the database.
+    """
+
+    def __init__(self, *args: object, body: str = "") -> None:
+        self.body = body
+        super().__init__(*args)
 
 
 class UsageAuthError(UsageFetchError):
@@ -49,12 +59,18 @@ class UsageAuthError(UsageFetchError):
 
 
 class UsageHTTPError(UsageFetchError):
-    """Non-2xx that is not an auth problem."""
+    """Non-2xx that is not an auth problem.
 
-    def __init__(self, status_code: int, detail: str = "") -> None:
+    Carries its body for the archive. A 429 or a 5xx is the response most worth
+    having later -- it is the one that explains why the dashboard went quiet -- and
+    only the unreadable-2xx path was keeping one, so precisely the rate-limit and
+    server-error bodies were the ones being dropped.
+    """
+
+    def __init__(self, status_code: int, detail: str = "", body: str = "") -> None:
         self.status_code = status_code
         suffix = f": {detail}" if detail else ""
-        super().__init__(f"HTTP {status_code}{suffix}")
+        super().__init__(f"HTTP {status_code}{suffix}", body=body)
 
 
 class UsageTransportError(UsageFetchError):
@@ -64,17 +80,11 @@ class UsageTransportError(UsageFetchError):
 class UsageProtocolError(UsageFetchError):
     """A 2xx whose body was not JSON.
 
-    Carries the redacted body so the poller can archive it. This is the likeliest
-    shape a real endpoint change takes -- an HTML error page, a login redirect, a
-    truncated response -- and it is exactly the body the raw archive exists to
+    The likeliest shape a real endpoint change takes -- an HTML error page, a login
+    redirect, a truncated response -- and exactly the body the raw archive exists to
     preserve, yet it never reached the store: the decode fails here, so the poller
-    only ever saw the exception. `body` is scrubbed by the same rules as the error
-    message, because it is written to the database.
+    only ever saw the exception.
     """
-
-    def __init__(self, message: str, body: str = "") -> None:
-        self.body = body
-        super().__init__(message)
 
 
 def build_headers(access_token: str) -> dict[str, str]:
@@ -103,7 +113,11 @@ async def fetch_usage(
         if response.status_code in (401, 403):
             raise UsageAuthError(f"HTTP {response.status_code}")
         if response.status_code >= 400:
-            raise UsageHTTPError(response.status_code, _short_body(response, access_token))
+            raise UsageHTTPError(
+                response.status_code,
+                _short_body(response, access_token),
+                body=_short_body(response, access_token, limit=ARCHIVE_BODY_LIMIT),
+            )
 
         try:
             return response.json()

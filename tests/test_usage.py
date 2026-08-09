@@ -112,6 +112,35 @@ def test_a_credential_in_the_response_never_survives_parsing(payload):
     assert "sk-ant" not in rendered
 
 
+def test_every_string_field_on_a_bucket_is_scrubbed():
+    """Regression: the scrub named `key` and `label`, so `severity` -- equally
+    response-derived, and served verbatim by /api/now -- went through untouched.
+    Asserted over the dataclass rather than field by field, so a string field added
+    later fails here instead of leaking."""
+    import dataclasses
+
+    snapshot = parse_usage({"limits": [{"kind": "session", "percent": 40, "severity": TOKEN}]})
+    bucket = snapshot.bucket("five_hour")
+
+    strings = [
+        getattr(bucket, f.name)
+        for f in dataclasses.fields(bucket)
+        if isinstance(getattr(bucket, f.name), str)
+    ]
+    assert strings, "the walk must actually find string fields"
+    for value in strings:
+        assert TOKEN not in value
+        assert "sk-ant" not in value
+
+
+def test_a_severity_the_endpoint_really_sends_is_preserved(live_response):
+    """The scrub is a no-op on real values -- severity is how the response flags a
+    bucket as approaching its limit, and mangling it would be worse than the leak."""
+    live_response["limits"][0]["severity"] = "warning"
+
+    assert parse_usage(live_response).bucket("five_hour").severity == "warning"
+
+
 def test_scrubbing_leaves_an_ordinary_response_untouched(live_response):
     """It must be a no-op on real data -- the fixture asserts no warnings elsewhere,
     and a scrub that altered bucket keys would break identity and dedup."""

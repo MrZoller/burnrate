@@ -20,7 +20,7 @@ from typing import Any
 
 import httpx
 
-from .client import UsageAuthError, UsageFetchError, UsageProtocolError, fetch_usage
+from .client import UsageAuthError, UsageFetchError, fetch_usage
 from .credentials import CredentialError, read_credential
 from .store import Store
 from .usage import UsageSnapshot, parse_usage
@@ -193,17 +193,14 @@ class Poller:
         except CredentialError as exc:
             self._record_failure("credential", str(exc))
             return None
-        except UsageProtocolError as exc:
-            # A 2xx we could not decode -- HTML error page, login redirect,
-            # truncated body. The likeliest shape a real endpoint change takes,
-            # and until now the one the raw archive never captured: the decode
-            # fails inside the client, so there was no payload to hand on. The
-            # body arrives already redacted.
+        except UsageFetchError as exc:
+            # One branch for every fetch error, archiving whichever of them carried a
+            # body. Two branches meant the archive depended on which exception type
+            # the client happened to raise: an undecodable 2xx was kept, while a 429
+            # or a 5xx -- the responses that actually explain why the dashboard went
+            # quiet -- were not. The body arrives already redacted.
             if exc.body:
                 self._archive_unreadable(exc.body, now)
-            self._record_failure(_error_kind(exc), str(exc))
-            return None
-        except UsageFetchError as exc:
             self._record_failure(_error_kind(exc), str(exc))
             return None
         except Exception as exc:  # noqa: BLE001 - the loop must survive anything

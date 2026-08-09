@@ -24,6 +24,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field, replace
+from dataclasses import fields as dataclass_fields
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -144,11 +145,23 @@ def parse_usage(payload: Any, fetched_at: datetime | None = None) -> UsageSnapsh
 
 
 def _scrubbed(bucket: Bucket) -> Bucket:
-    """A bucket whose response-derived identity carries no credential."""
-    key, label = scrub(bucket.key), scrub(bucket.label)
-    if key == bucket.key and label == bucket.label:
-        return bucket
-    return replace(bucket, key=key, label=label)
+    """A bucket with every string field scrubbed.
+
+    Walked over the dataclass rather than applied to a named list, which is what
+    let `severity` through: it is response-derived like `key` and `label`, is served
+    verbatim by /api/now, and naming two of the three fields was an invitation to
+    miss the third. `group` and `source` are internal constants, so scrubbing them
+    is a no-op -- the point is that a string field added later is covered without
+    anyone having to remember this function exists.
+    """
+    changed = {}
+    for field_info in dataclass_fields(bucket):
+        value = getattr(bucket, field_info.name)
+        if isinstance(value, str):
+            cleaned = scrub(value)
+            if cleaned != value:
+                changed[field_info.name] = cleaned
+    return replace(bucket, **changed) if changed else bucket
 
 
 def _collect_from_limits(limits: Any, buckets: dict[str, Bucket], warnings: list[str]) -> None:
