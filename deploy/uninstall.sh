@@ -13,7 +13,16 @@ LOG="$HOME/Library/Logs/burnrate.log"
 # path, report success, and leave the real database and its WAL files on disk.
 DB=""
 if [ -f "$PLIST_DST" ]; then
-  DB=$(plutil -extract EnvironmentVariables.BURNRATE_DB raw -o - "$PLIST_DST" 2>/dev/null || true)
+  # Captured through a sentinel, because `$(...)` strips ALL trailing newlines and
+  # `plutil ... raw` appends one of its own. For an ordinary path those cancel out; for
+  # a path that itself ends in a newline both went, so --purge deleted the shortened
+  # name -- possibly an unrelated database -- and left the real one in place while
+  # reporting success. The X survives the strip, and removing it leaves the bytes
+  # exactly as plutil wrote them; then exactly one newline comes off, which is
+  # plutil's terminator and not part of the value.
+  DB=$(plutil -extract EnvironmentVariables.BURNRATE_DB raw -o - "$PLIST_DST" 2>/dev/null; printf X) || true
+  DB=${DB%X}
+  DB=${DB%$'\n'}
 fi
 DB="${DB:-${BURNRATE_DB:-$HOME/.local/share/burnrate/burnrate.db}}"
 

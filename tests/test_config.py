@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from burnrate.config import (
+    DEFAULT_DB_PATH,
     DEFAULT_HOST,
     DEFAULT_PORT,
     MAX_POLL_INTERVAL_SECONDS,
@@ -244,3 +245,38 @@ def test_the_module_emits_nul_records_when_asked(monkeypatch):
     assert result.returncode == 0, result.stderr
     assert result.stdout.split("\0")[:2] == ["/tmp/a\nb.db", "127.0.0.1"]
     assert "\n" in result.stdout, "the path's own newline must survive"
+
+
+@pytest.mark.parametrize("name", ["BURNRATE_DB", "BURNRATE_HOST"])
+def test_an_empty_override_is_treated_as_unset(monkeypatch, name):
+    """Regression: os.environ.get returns "" for a variable that is set but empty,
+    because the key exists. For the database that made Path("") the current directory
+    once absolutised, so the store was handed a directory and startup died with
+    "unable to open database file" -- while the installer saw a non-empty path and
+    baked it into the plist. The numeric readers already degraded to their defaults
+    here, since float("") raises; these two did not."""
+    monkeypatch.setenv(name, "")
+
+    config = Config.from_env()
+
+    assert config.db_path == DEFAULT_DB_PATH
+    assert config.host == DEFAULT_HOST
+
+
+def test_an_empty_db_override_yields_a_file_not_a_directory(monkeypatch, tmp_path):
+    """The consequence, asserted rather than inferred: the store must be able to open
+    whatever from_env hands it."""
+    monkeypatch.setenv("BURNRATE_DB", "")
+
+    path = Config.from_env().db_path
+
+    assert not path.is_dir()
+    assert path.name == "burnrate.db"
+
+
+def test_a_single_space_is_still_a_real_path(monkeypatch):
+    """Only the truly empty string counts as unset. A space is a legal path component,
+    and treating it as absent would undo the whitespace handling elsewhere."""
+    monkeypatch.setenv("BURNRATE_DB", " ")
+
+    assert Config.from_env().db_path != DEFAULT_DB_PATH

@@ -54,12 +54,26 @@ class Config:
     def from_env(cls) -> Config:
         return cls(
             db_path=_db_path_env(),
-            host=os.environ.get("BURNRATE_HOST", DEFAULT_HOST),
+            host=_str_env("BURNRATE_HOST", DEFAULT_HOST),
             port=_int_env("BURNRATE_PORT", DEFAULT_PORT, 1, 65535),
             poll_interval=_positive_float_env(
                 "BURNRATE_POLL_INTERVAL", 60.0, MAX_POLL_INTERVAL_SECONDS
             ),
         )
+
+
+def _str_env(name: str, default: str) -> str:
+    """A non-empty string from the environment, or the default.
+
+    `os.environ.get(name, default)` returns "" for a variable that is set but empty,
+    because the key exists -- so an empty override was taken as a value rather than as
+    an absence. The numeric readers already degrade to their defaults there, since
+    float("") raises; these two did not. Only the truly empty string counts as unset:
+    a single space is a legal path component and treating it as absent would undo the
+    whitespace handling elsewhere.
+    """
+    value = os.environ.get(name)
+    return default if value is None or value == "" else value
 
 
 def _db_path_env() -> Path:
@@ -77,8 +91,13 @@ def _db_path_env() -> Path:
     `$PWD/~/private/burnrate.db`, while expanduser() gave `$HOME/private/...` --
     the same configuration naming two different files depending on how it was run.
     Python also handles `~user`, which shell string-matching would not.
+
+    An empty BURNRATE_DB is an absence, not a value. `Path("")` is `Path(".")`, which
+    became the current directory once made absolute -- so the store was handed a
+    directory and startup died with "unable to open database file", while the
+    installer saw a non-empty path and baked it into the plist.
     """
-    raw = Path(os.environ.get("BURNRATE_DB", str(DEFAULT_DB_PATH))).expanduser()
+    raw = Path(_str_env("BURNRATE_DB", str(DEFAULT_DB_PATH))).expanduser()
     return raw if raw.is_absolute() else Path.cwd() / raw
 
 
