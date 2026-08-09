@@ -12,7 +12,14 @@ DEFAULT_HOST = "0.0.0.0"  # noqa: S104 - LAN/Tailscale exposure is the point
 DEFAULT_PORT = 8377
 
 # A reading older than this is shown as stale rather than presented as current.
+# This is the floor, and it is deliberately three times the default interval: the
+# question staleness answers is "should a fresh reading have arrived by now", which
+# only has a fixed answer while the cadence is fixed.
 STALE_AFTER_SECONDS = 180.0
+
+# Missed polls tolerated before a reading is called stale. At the default interval
+# this reproduces the 180s above exactly.
+STALE_INTERVAL_FACTOR = 3.0
 
 # Longest poll interval we will accept. One day is already far past useful for a
 # usage dashboard, and the real job of the ceiling is that everything downstream
@@ -27,6 +34,19 @@ class Config:
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
     poll_interval: float = 60.0
+
+    @property
+    def stale_after_seconds(self) -> float:
+        """Age past which a reading is presented as stale rather than current.
+
+        Scaled to the configured cadence, because a fixed window is only right for
+        a fixed interval. Against the 180s constant, an hourly poll spent about 57
+        minutes of every hour showing the stale banner and withholding the
+        projection while nothing whatsoever was wrong -- and a banner that is
+        usually lit is a banner nobody reads, which costs the one signal that
+        means the data actually went bad.
+        """
+        return max(STALE_AFTER_SECONDS, self.poll_interval * STALE_INTERVAL_FACTOR)
 
     @classmethod
     def from_env(cls) -> Config:

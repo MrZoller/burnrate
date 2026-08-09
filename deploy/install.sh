@@ -82,9 +82,24 @@ printf '  poll  : every %ss\n' "$INTERVAL"
 printf '  log   : %s\n' "$LOG"
 printf '  url   : http://%s:%s/\n' "$(hostname -s)" "$PORT"
 
+# Probe the address uvicorn is actually listening on. A wildcard bind answers on
+# loopback, but a specific interface -- a LAN or Tailscale address, which is a
+# perfectly ordinary thing to set here -- does not, and probing 127.0.0.1 then
+# failed for the full timeout and reported the service unhealthy when it was fine.
+case "$HOST" in
+  0.0.0.0 | "::" | "" | "*") PROBE="127.0.0.1" ;;
+  *) PROBE="$HOST" ;;
+esac
+# An IPv6 literal needs brackets in a URL; a hostname or IPv4 address must not
+# have them. A colon is what separates the two cases.
+case "$PROBE" in
+  *:*) PROBE_URL="http://[$PROBE]:$PORT" ;;
+  *) PROBE_URL="http://$PROBE:$PORT" ;;
+esac
+
 printf '\nWaiting for the first poll'
 for _ in $(seq 1 20); do
-  if curl -fsS --max-time 2 "http://127.0.0.1:$PORT/api/healthz" >/dev/null 2>&1; then
+  if curl -fsS --max-time 2 "$PROBE_URL/api/healthz" >/dev/null 2>&1; then
     printf '\nUp and healthy.\n'
     exit 0
   fi

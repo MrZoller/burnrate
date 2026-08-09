@@ -112,6 +112,28 @@ def test_every_configured_interval_survives_timedelta(monkeypatch):
         timedelta(seconds=Config.from_env().poll_interval)
 
 
+def test_the_freshness_window_matches_the_old_constant_at_the_default_interval():
+    """The scaling must be invisible for anyone who never sets an interval."""
+    assert Config().stale_after_seconds == 180.0
+
+
+@pytest.mark.parametrize(
+    ("interval", "expected"),
+    [(1.0, 180.0), (30.0, 180.0), (60.0, 180.0), (600.0, 1800.0), (3600.0, 10800.0)],
+)
+def test_the_freshness_window_scales_with_the_interval(interval, expected):
+    """Regression: the window was a fixed 180s while intervals up to 86,400s are
+    accepted, so an hourly poll declared its own successful reading stale for about
+    57 minutes of every hour -- banner lit and projection withheld with nothing
+    wrong. A banner that is usually on is a banner nobody reads."""
+    assert Config(poll_interval=interval).stale_after_seconds == expected
+
+
+def test_the_freshness_window_never_drops_below_the_floor():
+    """A sub-second interval must not make the dashboard hair-trigger."""
+    assert Config(poll_interval=0.5).stale_after_seconds == 180.0
+
+
 def test_the_default_binding_is_lan_reachable():
     """0.0.0.0 is deliberate -- the dashboard is meant to be read from other
     machines on the tailnet. Pinned so it cannot be narrowed by accident."""

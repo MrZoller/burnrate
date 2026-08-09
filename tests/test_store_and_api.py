@@ -307,9 +307,9 @@ def make_client(tmp_path, live_response, monkeypatch):
     monkeypatch.setattr("burnrate.poller.Poller.stop", _noop)
     counter = {"n": 0}
 
-    def _build(age_seconds: float = 0.0):
+    def _build(age_seconds: float = 0.0, poll_interval: float = 60.0):
         counter["n"] += 1
-        config = Config(db_path=tmp_path / f"api{counter['n']}.db", poll_interval=60.0)
+        config = Config(db_path=tmp_path / f"api{counter['n']}.db", poll_interval=poll_interval)
         app = create_app(config)
         fetched_at = datetime.now(UTC) - timedelta(seconds=age_seconds)
         app.state.store.append_snapshot(parse_usage(live_response, fetched_at=fetched_at))
@@ -363,6 +363,34 @@ def test_now_includes_a_projection(client):
 
     assert body["projection"]["bucket_key"] == "seven_day"
     assert body["projection"]["status"] in {"projected", "clears_reset", "insufficient_data"}
+
+
+def test_an_hourly_poll_does_not_call_its_own_fresh_reading_stale(make_client):
+    """Regression: the freshness window was a fixed 180s, so a 10-minute-old
+    reading on an hourly cadence -- 50 minutes before the next poll is even due --
+    lit the stale banner and withheld the projection with nothing wrong."""
+    with make_client(age_seconds=600, poll_interval=3600.0) as client:
+        body = client.get("/api/now").json()
+
+    assert body["stale"] is False
+    assert body["stale_after_seconds"] == 10800.0
+    assert body["projection"]["status"] != "unavailable"
+
+
+def test_an_hourly_poll_still_goes_stale_eventually(make_client):
+    """The other half: scaling the window must not disable staleness."""
+    with make_client(age_seconds=4 * 3600, poll_interval=3600.0) as client:
+        body = client.get("/api/now").json()
+
+    assert body["stale"] is True
+
+
+def test_the_default_cadence_keeps_the_original_window(make_client):
+    with make_client(age_seconds=600) as client:
+        body = client.get("/api/now").json()
+
+    assert body["stale_after_seconds"] == 180.0
+    assert body["stale"] is True
 
 
 def test_a_stale_reading_serves_no_projection(make_client):

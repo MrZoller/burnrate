@@ -23,7 +23,7 @@ from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .config import STALE_AFTER_SECONDS, Config
+from .config import Config
 from .poller import Poller
 from .projection import Projection, project
 from .store import MAX_POINTS_PER_BUCKET, Sample, Store
@@ -65,11 +65,11 @@ def create_app(config: Config | None = None) -> FastAPI:
         buckets = _current_buckets(poller, store)
         staleness = poller.staleness_seconds(moment)
         weekly = next((b for b in buckets if b.key == "seven_day"), None)
+        # Scaled to the poll cadence, not a fixed 180s -- see Config.
+        stale_after = config.stale_after_seconds
 
         stale = (
-            staleness is None
-            or staleness > STALE_AFTER_SECONDS
-            or poller.status.consecutive_failures > 0
+            staleness is None or staleness > stale_after or poller.status.consecutive_failures > 0
         )
 
         # The moment the reading was taken, which is what the projection must be
@@ -82,7 +82,7 @@ def create_app(config: Config | None = None) -> FastAPI:
                 "generated_at": moment.isoformat(),
                 "stale": stale,
                 "staleness_seconds": staleness,
-                "stale_after_seconds": STALE_AFTER_SECONDS,
+                "stale_after_seconds": stale_after,
                 "poll_interval_seconds": config.poll_interval,
                 "buckets": [_bucket_json(b) for b in buckets],
                 "projection": _projection_json(

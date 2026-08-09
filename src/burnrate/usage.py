@@ -190,16 +190,14 @@ def _collect_from_top_level(
                 warnings.append(f"{key} was {type(value).__name__}, expected an object")
             continue
 
-        utilization, percent_warning = _read_percent(value, "utilization")
-        if utilization is None:
-            # Same split as the limits path: null is how this endpoint says "no
-            # limit of this kind", but a non-null value we cannot read means the
-            # gauge disappears, and it must not disappear quietly. Without the
-            # warning a malformed bucket sitting beside one valid bucket left the
-            # poll marked successful, the banner dark, and one gauge simply gone.
-            if percent_warning:
-                warnings.append(f"{key}: {percent_warning}")
-            continue
+        # The reset is read first, and the merge below happens before utilization
+        # is required. A top-level twin can carry only the reset -- utilization
+        # null, because limits[] is where the number lives -- and reading the
+        # percentage first meant skipping such an entry outright, so a limits entry
+        # with a percentage but no reset lost the reset that was sitting right
+        # there in the response. Same symptom as the earlier merge fix, one branch
+        # earlier: a gauge with no countdown and an unavailable weekly projection,
+        # from a response that contained everything needed.
         resets_at, reset_warning = _parse_timestamp(value.get("resets_at"))
         if reset_warning:
             warnings.append(f"{key}: {reset_warning}")
@@ -207,13 +205,20 @@ def _collect_from_top_level(
         existing = buckets.get(key)
         if existing is not None:
             # limits[] described this bucket already and does so more richly, so
-            # it wins -- but only field by field. A limits entry carrying a
-            # percentage and a null reset would otherwise discard a perfectly
-            # good reset sitting in the top-level twin, which costs the gauge its
-            # countdown and takes the weekly projection to "unavailable" for data
-            # the response actually contained.
+            # it wins -- but only field by field.
             if existing.resets_at is None and resets_at is not None:
                 buckets[key] = replace(existing, resets_at=resets_at)
+            continue
+
+        utilization, percent_warning = _read_percent(value, "utilization")
+        if utilization is None:
+            # Null is how this endpoint says "no limit of this kind", but a
+            # non-null value we cannot read means the gauge disappears, and it must
+            # not disappear quietly. Without the warning a malformed bucket sitting
+            # beside one valid bucket left the poll marked successful, the banner
+            # dark, and one gauge simply gone.
+            if percent_warning:
+                warnings.append(f"{key}: {percent_warning}")
             continue
 
         known = key in KNOWN_LABELS

@@ -200,6 +200,35 @@ def test_a_limits_entry_missing_its_reset_borrows_the_top_level_one(live_respons
     assert bucket.resets_at.isoformat().startswith("2026-08-15T16:00")
 
 
+def test_a_reset_only_top_level_twin_still_supplies_the_countdown():
+    """Regression, one branch earlier than the previous merge fix: the top-level
+    twin was skipped for a null utilization before its reset was ever read. So
+    limits[] carrying the percentage with no reset, next to a top-level object
+    carrying only the reset, produced a gauge with no countdown and an unavailable
+    weekly projection -- from a response that contained both halves."""
+    snapshot = parse_usage(
+        {
+            "limits": [{"kind": "weekly_all", "percent": 22, "resets_at": None}],
+            "seven_day": {"utilization": None, "resets_at": "2026-08-14T00:00:00Z"},
+        }
+    )
+
+    weekly = snapshot.weekly_primary
+    assert weekly.utilization == 22.0
+    assert weekly.resets_at == datetime(2026, 8, 14, tzinfo=UTC)
+    assert snapshot.warnings == ()
+
+
+def test_a_reset_only_twin_does_not_invent_a_bucket():
+    """The merge is for buckets limits[] already produced. A top-level object with
+    only a reset and no usable number is not a bucket on its own."""
+    snapshot = parse_usage(
+        {"seven_day": {"utilization": None, "resets_at": "2026-08-14T00:00:00Z"}}
+    )
+
+    assert snapshot.buckets == ()
+
+
 def test_a_malformed_limits_reset_also_falls_back(live_response):
     live_response["limits"][1]["resets_at"] = "whenever"
 
