@@ -365,6 +365,41 @@ def test_now_includes_a_projection(client):
     assert body["projection"]["status"] in {"projected", "clears_reset", "insufficient_data"}
 
 
+def test_known_buckets_carry_a_window_opened_at_one_period_before_the_reset(client):
+    """Item 1: the window start is surfaced, derived from resets_at minus the period
+    length (7d for the weekly bucket, 5h for the session)."""
+    by_key = {b["key"]: b for b in client.get("/api/now").json()["buckets"]}
+
+    for key, period in (("seven_day", timedelta(days=7)), ("five_hour", timedelta(hours=5))):
+        bucket = by_key[key]
+        opened = datetime.fromisoformat(bucket["window_opened_at"])
+        resets = datetime.fromisoformat(bucket["resets_at"])
+        assert resets - opened == period
+
+
+def test_an_unrecognized_bucket_reports_no_window_and_no_verdict(client):
+    """Item 1/5: an inferred start needs an assumed period the bucket does not have,
+    so it keeps "No reset reported" and never gets a colour-coded pace word."""
+    by_key = {b["key"]: b for b in client.get("/api/now").json()["buckets"]}
+    nimbus = by_key["nimbus_quill"]
+
+    assert nimbus["known"] is False
+    assert nimbus["window_opened_at"] is None
+    assert nimbus["elapsed_fraction"] is None
+    assert nimbus["pace_status"] == "unknown"
+    assert nimbus["pace_label"] == "Unknown"
+
+
+def test_every_known_bucket_carries_a_pace_verdict(client):
+    body = client.get("/api/now").json()
+    verdicts = {"on_pace", "ahead_of_pace", "on_pace_to_cap", "too_early", "unknown"}
+
+    for bucket in body["buckets"]:
+        assert bucket["pace_status"] in verdicts
+        if bucket["known"] and bucket["window_opened_at"]:
+            assert 0.0 <= bucket["elapsed_fraction"] <= 1.0
+
+
 def test_an_hourly_poll_does_not_call_its_own_fresh_reading_stale(make_client):
     """Regression: the freshness window was a fixed 180s, so a 10-minute-old
     reading on an hourly cadence -- 50 minutes before the next poll is even due --

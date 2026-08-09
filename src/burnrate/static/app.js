@@ -70,10 +70,23 @@ function serverNow() {
 const clamp = (value, lo, hi) => Math.min(hi, Math.max(lo, value));
 const pct = (value) => `${Math.round(value)}%`;
 
-function stateFor(utilization) {
-  if (utilization >= 90) return { key: "critical", label: "Critical", color: "var(--critical)" };
-  if (utilization >= 70) return { key: "warning", label: "Watch", color: "var(--warning)" };
-  return { key: "good", label: "Healthy", color: "var(--good)" };
+/* Pace, not level. The verdict and its colour both come from the backend's
+ * per-bucket pace math (burn% against elapsed%), so a gauge is never a green
+ * "Healthy" beside a hero warning of an imminent cap. Colours reuse the existing
+ * validated status tokens; the two neutral verdicts carry no colour at all, since
+ * "too early" and "unknown" are explicitly not judgements. */
+const PACE = {
+  on_pace: { color: "var(--good)" },
+  ahead_of_pace: { color: "var(--warning)" },
+  on_pace_to_cap: { color: "var(--critical)" },
+  too_early: { color: "var(--ink-muted)" },
+  unknown: { color: "var(--ink-muted)" },
+};
+
+/** {label, color} for a bucket's pace verdict; label text is the backend's. */
+function paceFor(bucket) {
+  const color = (PACE[bucket.pace_status] || PACE.unknown).color;
+  return { label: bucket.pace_label || "Unknown", color };
 }
 
 /** "5h 42m" / "3d 4h" / "48s" — coarse by design, this is a countdown not a clock. */
@@ -92,11 +105,6 @@ function formatAge(seconds) {
   if (seconds == null) return "never";
   if (seconds < 90) return `${Math.round(seconds)}s ago`;
   return `${formatDuration(seconds)} ago`;
-}
-
-/** Phrasing for "how old is this reading" that still reads when there is none. */
-function describeAge(seconds) {
-  return seconds == null ? "no successful reading yet" : `last read ${formatAge(seconds)}`;
 }
 
 function formatClock(iso) {
@@ -156,17 +164,15 @@ function arcPath(cx, cy, r, startAngle, endAngle) {
 
 function renderGauge(bucket, stale) {
   const utilization = clamp(Number(bucket.utilization) || 0, 0, 100);
-  const status = stateFor(utilization);
+  const pace = paceFor(bucket);
   // A stale reading is genuinely the last known number, so keep the percentage and
-  // the arc's magnitude -- but strip the present-tense judgement. `HEALTHY`/`Watch`/
-  // `Critical` is an assertion about a value we know to be old, so on stale the status
-  // word becomes a neutral "Stale" and the colour drops to muted: the dataviz rule
-  // forbids the colour carrying a meaning the label no longer does, so both go together.
-  // The banner and freshness line already say how old the reading is. This brings the
-  // gauges in line with the hero, charts and history labels, which are already
-  // staleness-aware (the details-table status word still is not -- see follow-up).
-  const stateColor = stale ? "var(--ink-muted)" : status.color;
-  const stateLabel = stale ? "Stale" : status.label;
+  // the arc's magnitude -- but strip the present-tense judgement. A pace verdict is
+  // an assertion about a value we know to be old, so on stale the word becomes a
+  // neutral "Stale" and the colour drops to muted: the dataviz rule forbids the
+  // colour carrying a meaning the label no longer does, so both go together. The
+  // banner and freshness line already say how old the reading is.
+  const stateColor = stale ? "var(--ink-muted)" : pace.color;
+  const stateLabel = stale ? "Stale" : pace.label;
   const cx = 80;
   const cy = 80;
   const r = 62;
@@ -208,11 +214,25 @@ function renderGauge(bucket, stale) {
     el("div", { class: "gauge__state", style: `color:${stateColor}`, text: stateLabel }),
   ]);
 
-  const countdown = el("div", {
-    class: "gauge__countdown",
-    "data-resets-at": bucket.resets_at || "",
-    text: bucket.resets_at ? "" : "No reset reported",
-  });
+  // Item 1: the window line is now primary -- "Fri 11:01 AM → Sat 10:59 AM" -- with
+  // the live countdown demoted to a secondary line. Three cases, and the middle one
+  // is the schema-drift path this project designs for: an unrecognized bucket can
+  // still carry a `resets_at` (the parser keeps it) but has no derivable window
+  // start, so it shows only the countdown -- printing "No reset reported" above a
+  // live "Resets in 6h" would be a false line. "No reset reported" is reserved for a
+  // bucket that genuinely has no reset at all.
+  let windowLine = null;
+  if (bucket.window_opened_at && bucket.resets_at) {
+    windowLine = el("div", {
+      class: "gauge__window",
+      text: `${formatClock(bucket.window_opened_at)} → ${formatClock(bucket.resets_at)}`,
+    });
+  } else if (!bucket.resets_at) {
+    windowLine = el("div", { class: "gauge__window", text: "No reset reported" });
+  }
+  const countdown = bucket.resets_at
+    ? el("div", { class: "gauge__countdown", "data-resets-at": bucket.resets_at, text: "" })
+    : null;
 
   const card = el(
     "div",
@@ -220,6 +240,8 @@ function renderGauge(bucket, stale) {
     [
       el("div", { class: "gauge__label", text: bucket.label }),
       el("div", { class: "gauge__dial" }, [svg, readout]),
+      renderElapsedBar(bucket, stale),
+      windowLine,
       countdown,
       bucket.known
         ? null
@@ -227,6 +249,37 @@ function renderGauge(bucket, stale) {
     ],
   );
   return card;
+}
+
+/* Item 2: a thin time-elapsed bar under the dial -- window start at the left, reset
+ * at the right, a marker at the reading. It sets percent-of-time-elapsed directly
+ * against the arc's percent-of-budget-burned, so pace is legible per card without the
+ * hero. Deliberately uncoloured by pace (the gauge already carries the verdict's
+ * colour) and anchored to the reading time, not the wall clock: `elapsed_fraction`
+ * comes from the backend measured at the reading, so on a stale reading the marker
+ * freezes where the data left it instead of sliding on over hours nobody sampled. */
+function renderElapsedBar(bucket, stale) {
+  // Bail BEFORE coercion: the backend sends `elapsed_fraction: null` for buckets
+  // with no derivable window (unknown buckets, and any bucket missing a reset), and
+  // `Number(null)` is a finite 0 that would slip past the check below -- rendering a
+  // confident "0% elapsed" bar on the schema-drift path, the same false line the
+  // window line above already omits. Loose `==` catches null and undefined together.
+  if (bucket.elapsed_fraction == null) return null;
+  const fraction = Number(bucket.elapsed_fraction);
+  if (!Number.isFinite(fraction)) return null;
+  const left = `${clamp(fraction * 100, 0, 100)}%`;
+  return el(
+    "div",
+    {
+      class: `gauge__bar${stale ? " gauge__bar--stale" : ""}`,
+      role: "img",
+      "aria-label": `${pct(fraction * 100)} of the window elapsed at this reading`,
+    },
+    [
+      el("div", { class: "gauge__bar-elapsed", style: `width:${left}` }),
+      el("div", { class: "gauge__bar-marker", style: `left:${left}` }),
+    ],
+  );
 }
 
 function renderGauges(buckets, stale) {
@@ -522,16 +575,16 @@ function attachHover(svg, ctx) {
 
 function renderTable(buckets) {
   els.tableBody.replaceChildren(
-    ...buckets.map((bucket) => {
-      const status = stateFor(bucket.utilization);
-      return el("tr", {}, [
+    ...buckets.map((bucket) =>
+      el("tr", {}, [
         el("td", { text: bucket.label }),
         el("td", { text: pct(bucket.utilization) }),
-        el("td", { text: status.label }),
+        // Pace, matching the gauges -- a level word here would contradict them.
+        el("td", { text: bucket.pace_label || "Unknown" }),
         el("td", { text: bucket.resets_at ? formatClock(bucket.resets_at) : "—" }),
         el("td", { text: bucket.source || "—" }),
-      ]);
-    }),
+      ]),
+    ),
   );
 }
 
@@ -542,13 +595,18 @@ function renderHero(projection, weekly) {
   els.hero.setAttribute("data-status", status);
 
   if (status === "projected" || status === "clears_reset") {
+    // Item 3: the headline reads as the forecast it is. "Cap at Tue 6:01 AM"
+    // asserted a fact and left the conditional buried in the fine print; the
+    // "On pace to…" phrasing puts the if back where a reader sees it first. The
+    // fine print still carries the evidence: rate, window age, and current %.
     const rate = projection.rate_per_hour;
-    const detail =
-      `${projection.message} Burning ${rate.toFixed(1)}%/hour since the period opened ` +
-      `${formatDuration(projection.elapsed_hours * 3600)} ago; now at ${pct(projection.utilization)}.`;
     els.heroValue.textContent =
-      status === "clears_reset" ? "Clears the reset" : `Cap at ${formatClock(projection.hits_cap_at)}`;
-    els.heroDetail.textContent = detail;
+      status === "clears_reset"
+        ? "On pace to clear the reset"
+        : `On pace to hit the cap ${formatClock(projection.hits_cap_at)}`;
+    els.heroDetail.textContent =
+      `Burning ${rate.toFixed(1)}%/hour since the window opened ` +
+      `${formatDuration(projection.elapsed_hours * 3600)} ago; now at ${pct(projection.utilization)}.`;
     return;
   }
 
@@ -576,25 +634,31 @@ function renderBanner(data, fetchError) {
   const status = data.status || {};
   const age = data.staleness_seconds;
 
-  if (status.last_error) {
-    show(
-      status.consecutive_failures > 2 ? "error" : "warn",
-      `Usage fetch failing (${status.consecutive_failures}×)`,
-      `${status.last_error} — ${describeAge(age)}.`,
-    );
-    els.dot.dataset.state = status.consecutive_failures > 2 ? "error" : "stale";
-    return;
-  }
-
-  if (data.stale) {
-    show(
-      "warn",
-      "Data may be stale",
-      `${describeAge(age)[0].toUpperCase()}${describeAge(age).slice(1)}, past the ${Math.round(
-        data.stale_after_seconds,
-      )}s freshness window.`,
-    );
-    els.dot.dataset.state = "stale";
+  // One banner for "the numbers may be behind", whether the poller is actively
+  // failing or a reading has simply aged past the freshness window. It always names
+  // both the cause and how old the reading is, in a single line, so it can never sit
+  // as a bare "may be stale" beside a confident "Updated 8s ago".
+  //
+  // Diagnosis behind the merge: `data.stale` flips true the instant one poll fails
+  // (consecutive_failures > 0), even seconds after a success, so the reading is often
+  // NOT genuinely old -- the two independent branches let a fresh stamp and a stale
+  // banner disagree with no explanation. The fix is to spell the age and cause out
+  // together, and (in refresh()) to stop the stamp claiming "Updated" while stale.
+  if (status.last_error || data.stale) {
+    const failing = Boolean(status.last_error);
+    const severity = failing && status.consecutive_failures > 2 ? "error" : "warn";
+    const cause = failing
+      ? status.last_error
+      : `no new reading within the ${Math.round(data.stale_after_seconds)}s freshness window`;
+    const title = failing
+      ? `Usage fetch failing (${status.consecutive_failures}×)`
+      : "Data may be stale";
+    // On a fresh install whose very first poll fails there is no reading to age --
+    // `formatAge(null)` is "never", so "Last reading never" reads wrong. Name the
+    // no-reading-yet state directly, still carrying the cause.
+    const lead = age == null ? "No successful reading yet" : `Last reading ${formatAge(age)}`;
+    show(severity, title, `${lead} — ${cause}.`);
+    els.dot.dataset.state = severity === "error" ? "error" : "stale";
     return;
   }
 
@@ -685,10 +749,15 @@ async function refresh({ history = true } = {}) {
     renderTable(state.buckets);
     renderHero(data.projection, state.buckets.find((b) => b.key === "seven_day"));
 
+    // Never a confident "Updated" while the banner says stale -- that contradiction
+    // (a fresh stamp beside a stale banner) is the bug item 4 diagnoses. When stale,
+    // the stamp reports the reading's age the same way the outage path does.
     els.freshness.textContent =
       data.staleness_seconds == null
         ? "No reading yet"
-        : `Updated ${formatAge(data.staleness_seconds)}`;
+        : data.stale
+          ? `Stale — last read ${formatAge(data.staleness_seconds)}`
+          : `Updated ${formatAge(data.staleness_seconds)}`;
     els.footerMeta.textContent = [
       `Credential source: ${data.status?.credential_source ?? "unknown"}`,
       `poll every ${Math.round(data.poll_interval_seconds)}s`,

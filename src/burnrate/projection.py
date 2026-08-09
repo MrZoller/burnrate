@@ -45,6 +45,28 @@ IDLE = "idle"
 INSUFFICIENT_DATA = "insufficient_data"
 UNAVAILABLE = "unavailable"
 
+# Per-bucket pace verdicts. Unlike the projection status these describe *rate*, not
+# level: how far burned against how far into the window. The dashboard colours each
+# gauge by one of these, so the colour agrees with the word instead of contradicting
+# it (a green "Healthy" beside a hero warning of an imminent cap was the bug).
+ON_PACE = "on_pace"
+AHEAD_OF_PACE = "ahead_of_pace"
+ON_PACE_TO_CAP = "on_pace_to_cap"
+TOO_EARLY = "too_early"
+UNKNOWN_PACE = "unknown"
+
+PACE_LABELS: dict[str, str] = {
+    ON_PACE: "On pace",
+    AHEAD_OF_PACE: "Ahead of pace",
+    ON_PACE_TO_CAP: "On pace to cap",
+    TOO_EARLY: "Too early to tell",
+    UNKNOWN_PACE: "Unknown",
+}
+
+
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
+
 
 @dataclass(frozen=True)
 class Projection:
@@ -247,4 +269,79 @@ def project(
         hits_cap_at=reading_at + timedelta(hours=hours_to_cap),
         hours_to_cap=hours_to_cap,
         **base,
+    )
+
+
+@dataclass(frozen=True)
+class Pace:
+    """A bucket's pace verdict plus what the time-elapsed bar needs to draw itself.
+
+    `elapsed_fraction` is measured at the reading time, not at wall-clock now, so the
+    bar's marker ages honestly with the data: a reading that stopped updating freezes
+    the marker where it was instead of sliding it toward the reset over dead data.
+    """
+
+    status: str
+    label: str
+    window_opened_at: datetime | None = None
+    resets_at: datetime | None = None
+    elapsed_fraction: float | None = None
+    utilization: float | None = None
+
+
+def _classify_pace(projection: Projection, bucket: Bucket, elapsed_fraction: float | None) -> str:
+    """Turn a projection into a pace verdict, sharing item 2's elapsed/burn math.
+
+    The order is the one the issue spells out: below the elapsed line is "on pace"
+    regardless of where the projection lands, and only above it does the projection
+    split "ahead" (clears the reset) from "to cap" (crosses it first).
+    """
+    status = projection.status
+    if status in (UNAVAILABLE, INSUFFICIENT_DATA) or elapsed_fraction is None:
+        # No usable window yet, or too early for the rate to mean anything. Neutral,
+        # never a colour-coded verdict on data that cannot support one.
+        return TOO_EARLY
+    if bucket.utilization / 100.0 <= elapsed_fraction:
+        return ON_PACE
+    if status == CLEARS_RESET:
+        return AHEAD_OF_PACE
+    # PROJECTED (crosses before the reset) or AT_CAP (already there).
+    return ON_PACE_TO_CAP
+
+
+def pace_for(
+    bucket: Bucket | None,
+    now: datetime | None = None,
+    *,
+    reading_at: datetime | None = None,
+) -> Pace:
+    """Where `bucket` sits against its own window: how far burned vs how far elapsed.
+
+    Deliberately does not take `stale`. This is the factual position of the reading
+    within its window; whether that reading is too old to trust is a separate UI
+    decision (the gauge greys itself out), and withholding the window here would take
+    the time-elapsed bar down with it.
+    """
+    if bucket is None or not bucket.known:
+        return Pace(
+            status=UNKNOWN_PACE,
+            label=PACE_LABELS[UNKNOWN_PACE],
+            resets_at=bucket.resets_at if bucket else None,
+            utilization=bucket.utilization if bucket else None,
+        )
+
+    projection = project(bucket, now=now, reading_at=reading_at)
+    elapsed_fraction: float | None = None
+    if projection.elapsed_hours is not None:
+        period = period_hours_for(bucket.key)
+        elapsed_fraction = _clamp(projection.elapsed_hours / period, 0.0, 1.0)
+
+    status = _classify_pace(projection, bucket, elapsed_fraction)
+    return Pace(
+        status=status,
+        label=PACE_LABELS[status],
+        window_opened_at=projection.window_start,
+        resets_at=projection.resets_at or bucket.resets_at,
+        elapsed_fraction=elapsed_fraction,
+        utilization=bucket.utilization,
     )
