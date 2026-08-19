@@ -30,7 +30,7 @@ related-issue references; only explicit prerequisites would constrain selection.
   - pr: 32
 - [!] T7 (standard) — dashboard: "Ahead of pace" (amber) pace tier is unreachable under linear projection (follow-up to #15) (Fixes #18)
   - acceptance: human must define the amber tier's testable product semantics or explicitly remove it from the projection/API/dashboard vocabulary in Q4
-- [R] T8 (trivial) — dashboard: details-table status word is not staleness-aware (follow-up to #5) (Fixes #13)
+- [x] T8 (trivial) — dashboard: details-table status word is not staleness-aware (follow-up to #5) (Fixes #13)
   - acceptance: `renderTable` receives snapshot staleness on success and outage paths; stale rows retain numeric details but show no live Healthy/Watch/Critical judgment or live color carrier; regression coverage verifies the static-page wiring
   - pr: 33
 - [ ] T9 (trivial) — dashboard: refreshHistory() has the same newest-issued starvation as refresh() (#4) (Fixes #11)

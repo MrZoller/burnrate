@@ -3,9 +3,9 @@
   "phase": "build",
   "spec_approved": true,
   "plan_approved": true,
-  "current_task": "T8",
-  "branch": "factory/t8-stale-table-status",
-  "pr": 33,
+  "current_task": null,
+  "branch": null,
+  "pr": null,
   "hold": false,
-  "updated": "2026-08-19T05:20:40Z"
+  "updated": "2026-08-19T05:23:21Z"
 }
