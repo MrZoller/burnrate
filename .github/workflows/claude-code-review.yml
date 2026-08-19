@@ -59,7 +59,13 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf .claude .mcp.json
-          rm -f CLAUDE.md AGENTS.md
+          # Tree-wide: Claude Code auto-loads CLAUDE.md/AGENTS.md from ANY
+          # directory it reads files in — which a review does constantly — and
+          # still reads the deprecated CLAUDE.local.md. Deleting only the root
+          # pair would leave a PR free to plant src/CLAUDE.md instead.
+          find . -path ./.git -prune -o \
+            \( -name 'CLAUDE*.md' -o -name 'AGENTS.md' \) -type f -print0 \
+            | xargs -0 -r rm -f
           if git fetch --depth 1 origin "$BASE_SHA" 2>/dev/null; then
             git checkout "$BASE_SHA" -- CLAUDE.md 2>/dev/null || true
             git checkout "$BASE_SHA" -- AGENTS.md 2>/dev/null || true
