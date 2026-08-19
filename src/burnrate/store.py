@@ -394,7 +394,10 @@ class Store:
 
         for path in attribution.iter_jsonl_files(root):
             stats.files_scanned += 1
-            key = str(path)
+            # Filesystem APIs preserve undecodable bytes as surrogate-bearing strings.
+            # SQLite's Python adapter cannot bind those strings, so repair every
+            # path-derived identity before it reaches either table in this transaction.
+            key = _sqlite_text(str(path))
             offset = watermarks.get(key, 0)
             # A per-file identity for turns that carry no sessionId, so they do not all
             # collapse into one fabricated cross-file "unknown" session with a combined
@@ -639,7 +642,22 @@ def _session_fallback(root: Path | str, path: Path) -> str:
         rel = path.relative_to(root)
     except ValueError:
         rel = path
-    return f"unknown:{rel}"
+    return _sqlite_text(f"unknown:{rel}")
+
+
+def _sqlite_text(value: str) -> str:
+    """Make a SQLite-bindable, collision-free identity for a filesystem string.
+
+    Python represents undecodable filesystem bytes as surrogate code points. SQLite's
+    UTF-8 adapter cannot bind those directly, so spell each surrogate as a distinct
+    ``\\uXXXX`` escape rather than replacing every one with the same question mark.
+    This keeps watermark and fallback-session identities separate for distinct paths.
+    """
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return value.encode("utf-8", "backslashreplace").decode("utf-8")
+    return value
 
 
 def _fold_turn(

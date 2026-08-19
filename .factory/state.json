@@ -1,11 +1,11 @@
 {
   "project": "burnrate",
-  "phase": "specify",
-  "spec_approved": false,
-  "plan_approved": false,
-  "current_task": null,
-  "branch": null,
+  "phase": "build",
+  "spec_approved": true,
+  "plan_approved": true,
+  "current_task": "T4",
+  "branch": "factory/t4-handle-non-utf8-paths",
   "pr": null,
   "hold": false,
-  "updated": "2026-08-19T01:33:58Z"
+  "updated": "2026-08-19T03:27:44Z"
 }
