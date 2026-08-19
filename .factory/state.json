@@ -5,7 +5,7 @@
   "plan_approved": true,
   "current_task": "T4",
   "branch": "factory/t4-handle-non-utf8-paths",
-  "pr": null,
+  "pr": 29,
   "hold": false,
-  "updated": "2026-08-19T03:27:44Z"
+  "updated": "2026-08-19T03:37:23Z"
 }
