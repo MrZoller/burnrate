@@ -49,7 +49,7 @@ PRUNE_EVERY = timedelta(hours=6)
 # Minimum spacing between local token-attribution rollups (issue #16). This is a
 # floor, not a fixed cadence: aggregation is driven from `poll_once`, so it can only
 # run when a poll runs. It is independent of the remote endpoint's OUTCOME -- it runs
-# before the fetch and a failing usage fetch never stops it -- but not of the poll
+# alongside the fetch and a failing usage fetch never stops it -- but not of the poll
 # CADENCE: at a long poll interval, or while backoff has stretched the interval out,
 # the effective spacing is the poll interval when that exceeds this floor. At the
 # default 60s cadence that is invisible; only an unusually long interval makes the
@@ -226,17 +226,23 @@ class Poller:
         # trigger never fires, so the advertised retention applied precisely never
         # during the outage that was filling it.
         self._maybe_prune(now)
-        # Also before the fetch and regardless of its outcome: attribution reads local
-        # JSONLs, so it must keep updating even while the remote endpoint is failing.
-        await self._maybe_aggregate(now)
-
-        # The reading's own timestamp, taken AFTER aggregation and just before the fetch.
-        # A first aggregation pass can take minutes; reusing the poll-start `now` here
-        # charged that scan's duration to freshness, so a just-fetched sample read stale
-        # -- worst at startup, when the scan is longest. `now` still stamps the attempt
-        # and gates prune/aggregate; `fetched_at` stamps the sample and its success.
+        # The remote reading and local attribution pass are independent. Starting both
+        # together keeps a minutes-long first transcript scan from delaying the primary
+        # usage meter, while gather still waits for attribution on every fetch outcome.
+        # Both paths contain their own failures so one cannot cancel the other.
+        #
+        # `now` stamps the attempt and gates prune/aggregate. The reading gets its own
+        # timestamp immediately before these jobs start, so aggregation duration is not
+        # charged to the remote sample's freshness.
         fetched_at = datetime.now(UTC)
+        usage, _ = await asyncio.gather(
+            self._poll_usage(fetched_at),
+            self._maybe_aggregate(now),
+        )
+        return usage
 
+    async def _poll_usage(self, fetched_at: datetime) -> UsageSnapshot | None:
+        """Fetch, parse, and persist one remote reading; never raise."""
         try:
             payload = await self._fetch_with_one_auth_retry()
         except CredentialError as exc:
@@ -324,8 +330,8 @@ class Poller:
         Called from `poll_once`, so its real spacing is the larger of AGGREGATE_EVERY
         and the poll interval -- there is no separate timer, and at a long interval (or
         during backoff) the rollup is only as fresh as the last poll. It does not depend
-        on the fetch SUCCEEDING, though: it runs before the fetch and every failure path
-        still lets the next poll reach it, so a broken usage endpoint never freezes it.
+        on the fetch SUCCEEDING, though: it runs alongside the fetch and gather waits for
+        both paths, so a broken usage endpoint never freezes it.
 
         Runs the parse and the SQLite writes on a worker thread so a large first pass
         over the transcript tree never blocks the event loop, and swallows everything:
