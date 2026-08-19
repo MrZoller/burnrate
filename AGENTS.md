@@ -14,15 +14,12 @@ All verified on this machine (Python 3.12.12, ruff 0.16.2, fastapi 0.141.1):
 
 - setup: `uv sync --frozen` (CI uses `uv sync --frozen`; the README says plain
   `uv sync`). A `uv run` boots the existing `.venv` automatically.
-- test: `uv run pytest`
-  - **Known today:** 488 passed, **2 failed** — `test_store_and_api.py::
-    test_now_includes_a_projection` and `::test_an_hourly_poll_does_not_call_
-    its_own_fresh_reading_stale`. Both are **date-sensitive** (see Gotchas):
-    the `tests/fixtures/live_response.json` hardcodes `resets_at` timestamps
-    that are now in the past, so `project()` correctly refuses to project. Run
-    `uv run pytest --deselect tests/test_store_and_api.py::test_now_includes_a_projection
-    --deselect tests/test_store_and_api.py::test_an_hourly_poll_does_not_call_its_own_fresh_reading_stale`
-    for a green suite until the fixture is made relative to "now".
+- test: `uv run pytest` — 491 passed, and clock-independent. The captured
+  fixture's `resets_at` values are absolute, so `make_client` seeds the store
+  through the `live_response_at(fetched_at)` fixture in `tests/conftest.py`,
+  which shifts every reset by `fetched_at - CAPTURED_AT`. Put new
+  projection/staleness tests on that fixture; `live_response` stays verbatim
+  for parse-fidelity tests that assert the captured dates literally.
 - lint: `uv run ruff check .` (selects E, F, I, UP, B; line-length 100)
 - format: `uv run ruff format --check .` — `ruff format .` writes in place
   (this is what CLAUDE.md lists as the lint/format line; CI checks).
@@ -103,15 +100,16 @@ worklog, questions).
 
 ## Gotchas
 
-- **The test suite is date-sensitive and currently failing 2 tests.** The real
-  captured fixture `tests/fixtures/live_response.json` hardcodes `resets_at`
-  timestamps (`2026-08-08` / `2026-08-15`). `project()` refuses to project once
-  `now >= resets_at`, so on any machine with the clock past 2026-08-15 the two
-  projection tests above fail. This is a latent time-bomb, not a code regression.
-  The fix is to make the fixture's reset times relative to "now" (and re-check the
-  hardcoded dates in `test_usage.py`, e.g. `test_plausible_reset_time_is_kept`).
-  Before fixing, be aware the tests pin behavior around the *specific* fixture
-  values (e.g. `seven_day` util 14.0, reset `2026-08-15T16:00`).
+- **The captured fixture is absolute — seed it through `live_response_at`.**
+  `tests/fixtures/live_response.json` is a real response whose `resets_at`
+  values are fixed dates (`2026-08-08` / `2026-08-15`), and `project()` refuses
+  to project once `now >= resets_at`. Seeding a client with it verbatim
+  therefore rots into failures by calendar rather than by regression, which is
+  what happened before 623cf88 — that commit added the
+  `live_response_at(fetched_at)` conftest fixture and switched `make_client` to
+  it. Anything needing a *live* window goes through that fixture; anything
+  asserting the capture's literal values (`test_usage.py:324`) keeps reading
+  `live_response`.
 - Do not change production code while onboarding. Both new files (`AGENTS.md`,
   `docs/codebase-map.md`) are additive.
 - There is **no module-level `app`**: building one at import creates a database

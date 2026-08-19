@@ -174,16 +174,17 @@ These are enforced by tests and must survive any change:
 
 ## Bodies are buried here (fragile / surprising / dead)
 
-- **The date-sensitive test fixture — the #1 landmine.** `tests/fixtures/
-  live_response.json` hardcodes `resets_at` (`2026-08-08T23:30` five_hour,
-  `2026-08-15T16:00` seven_day). `project()` refuses to project once
-  `now >= resets_at` (`projection.py:191`), so after 2026-08-15 two
-  projection tests fail on every machine:
-  `test_store_and_api.py::test_now_includes_a_projection` and
-  `::test_an_hourly_poll_does_not_call_its_own_fresh_reading_stale`.
-  **Fix is to make the fixture relative to "now"**, but be careful — several
-  tests pin behavior around the *specific* fixture values (e.g. weekly util 14.0,
-  `resets_at` starting `2026-08-15T16:00`, `test_usage.py:324`).
+- **The captured fixture is absolute — seed it through `live_response_at`.**
+  `tests/fixtures/live_response.json` hardcodes `resets_at`
+  (`2026-08-08T23:30` five_hour, `2026-08-15T16:00` seven_day), and `project()`
+  refuses to project once `now >= resets_at` (`projection.py:191`). Seeding a
+  client with the capture verbatim therefore fails by calendar rather than by
+  regression. 623cf88 fixed that: `live_response_at(fetched_at)` shifts every
+  reset by `fetched_at - CAPTURED_AT` (anchored to the `NOW` the suite already
+  declared), and `make_client` seeds from it. The old caution still holds in
+  one direction — several tests pin behavior on the *specific* captured values
+  (weekly util 14.0, `resets_at` starting `2026-08-15T16:00`,
+  `test_usage.py:324`), so those keep reading `live_response` verbatim.
 - **The amber "Ahead of pace" tier is provably unreachable.** `projection.py`
   keeps `AHEAD_OF_PACE` in `_classify_pace`, but under linear projection
   burn% > elapsed% ⟺ the pace crosses 100% before the reset, so no input ever
@@ -251,6 +252,7 @@ These are enforced by tests and must survive any change:
 `test_poller`, `test_store_and_api` (store + both JSON endpoints), `test_client`,
 `test_credentials`, `test_redact`, `test_config`, `test_plist`, `test_attribution`,
 plus `test_install` / `test_uninstall` which source the deploy scripts.
-`conftest.py` provides the shared `live_response` fixture. `asyncio_mode = "auto"`
+`conftest.py` provides the shared `live_response` fixture (the verbatim capture)
+and `live_response_at(fetched_at)`, which rebases its resets onto a given clock. `asyncio_mode = "auto"`
 means async tests need no decorator. Tests construct `Bucket`/`Turn` objects
 directly and favor hostile inputs over happy paths — new tests should follow suit.
