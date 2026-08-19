@@ -34,7 +34,8 @@ trade-off.
   do blocking SQLite reads, and Starlette runs sync handlers in a threadpool. An
   async handler would stall the event loop on a large history query.
 
-The two JSON endpoints were deliberately `def` for the same reason the *poller*
+All four JSON endpoints (`/api/now`, `/api/history`, `/api/attribution`,
+`/api/healthz`) are deliberately `def` for the same reason the *poller*
 runs its blocking reads on worker threads — see `poller.py:378` for the
 `asyncio.to_thread(read_credential)` note.
 
@@ -100,7 +101,9 @@ the query's own cutoff, not epoch boundaries.
 ```
 aggregate_jsonl (store.py, on a worker thread, every ~10 min):
   for each ~/.claude/projects/**/*.jsonl (sorted):
-    read only bytes past the per-file watermark (read_new_lines, bounded 8MB chunks)
+    read only bytes past the per-file watermark (read_new_lines: 8MB pieces, stopping
+      at the first piece containing a newline — so a SINGLE line longer than the cap
+      is still read and joined whole; the cap bounds the read, not peak memory)
     parse_lines -> Turn objects (tolerant; malformed/skipped lines tallied)
     fold each turn into in-memory hourly_usage + sessions_rollup
   flush all three (hourly, sessions, watermarks) in ONE transaction
@@ -146,8 +149,12 @@ JS (no build step, no `package.json`).
 Every unreadable-but-present value is a **warning** (drift → banner); every
 `null` is silence (that's how the endpoint disables a limit). Unrecognized
 buckets render under their raw key with a dashed border plus a notice, never a
-warning. The raw body of every response (deduped by content) is archived in
-`raw_snapshots` so a future schema change is diagnosable after the fact.
+warning. Successful decoded payloads are archived in full in `raw_snapshots`
+(token-scrubbed, deduped by content) so a future schema change is diagnosable
+after the fact. Failure bodies are NOT: an HTTP error or non-JSON response is
+kept only as a scrubbed excerpt truncated to `ARCHIVE_BODY_LIMIT` (4000 chars,
+newlines flattened) by `client._short_body`, so post-hoc diagnosis of an outage
+has less to work with than diagnosis of a schema drift.
 
 The README documents a completed investigation ("No promo / adjusted-cap field
 is present", README.md:129-144): a promo/adjusted-cap field was hunted for across
