@@ -856,24 +856,31 @@ async function refresh({ history = true } = {}) {
   }
 }
 
-/* Identifies the newest history request in flight. Two can overlap -- click 24h
- * then 3d, or click a range while the 60s refresh is already fetching -- and the
- * slower earlier one could land last, so its data became state.history while
- * renderCharts scaled it against the range now selected: a 3-day axis over 24
- * hours of points, with statistics to match. Only the newest response is applied,
- * and it carries its own range so nothing has to infer one. */
+/* historyRequest is the newest request ISSUED; appliedHistory is the newest whose
+ * OUTCOME was rendered. Gating on the latter avoids newest-issued starvation when
+ * every same-window fetch overlaps the next refresh, while still dropping genuinely
+ * older outcomes. The requested window is a separate identity guard: after a range
+ * change, an old response must not render 24h points against the newly selected 3d
+ * axis merely because the newer 3d request is still in flight. */
 let historyRequest = 0;
+let appliedHistory = 0;
 
 async function refreshHistory() {
   const token = ++historyRequest;
   const hours = state.hours;
   try {
     const data = await loadHistory(hours);
-    if (token !== historyRequest) return;
+    if (hours !== state.hours) return;
+    if (token <= appliedHistory) return;
+    appliedHistory = token;
     state.history = data;
     renderCharts(state.history);
   } catch (error) {
-    if (token !== historyRequest) return;
+    if (hours !== state.hours) return;
+    // Strict `<` lets a render failure from this invocation surface while dropping an
+    // older request whose outcome completed after a newer one was already rendered.
+    if (token < appliedHistory) return;
+    appliedHistory = token;
     // The cached payload goes too. Leaving it meant the table kept listing the
     // previous window's figures while the chart beside it said history was
     // unavailable, and the outage path would later redraw those same cached points
