@@ -422,7 +422,7 @@ def test_a_surrogate_bearing_jsonl_path_commits_and_is_watermarked(tmp_path, mon
     )
     reads: list[int] = []
 
-    monkeypatch.setattr(attribution, "iter_jsonl_files", lambda _: [path])
+    monkeypatch.setattr(attribution, "scan_jsonl_files", lambda _: ([path], True))
 
     def read_once(_: Path, offset: int) -> tuple[list[str], int, bool]:
         reads.append(offset)
@@ -463,7 +463,7 @@ def test_distinct_surrogate_paths_keep_sqlite_identities(tmp_path, monkeypatch):
         second: _assistant(ts=now, session=None, input_tokens=13),
     }
 
-    monkeypatch.setattr(attribution, "iter_jsonl_files", lambda _: [first, second])
+    monkeypatch.setattr(attribution, "scan_jsonl_files", lambda _: ([first, second], True))
 
     def read_once(path: Path, offset: int) -> tuple[list[str], int, bool]:
         return ([lines[path]], 1, True) if offset == 0 else ([], offset, True)
@@ -489,6 +489,46 @@ def test_distinct_surrogate_paths_keep_sqlite_identities(tmp_path, monkeypatch):
     assert len(sessions) == 2
     assert {session["total_tokens"] for session in sessions} == {61, 63}
     assert all(session["session_id"].startswith("unknown:") for session in sessions)
+
+
+def test_post_read_stat_failure_keeps_aggregated_turns_watermarked(tmp_path, monkeypatch):
+    """A failed metadata refresh must not make already-folded bytes re-readable."""
+    now = datetime.now(UTC)
+    root = _tree(
+        tmp_path / "projects",
+        {
+            "first.jsonl": [
+                _assistant(cwd="/work/first", input_tokens=10, output_tokens=0, ts=now)
+            ],
+            "second.jsonl": [
+                _assistant(cwd="/work/second", input_tokens=20, output_tokens=0, ts=now)
+            ],
+        },
+    )
+    first = root / "proj-0" / "first.jsonl"
+    original_stat = Path.stat
+    first_stat_calls = 0
+    fail_post_read = True
+
+    def stat_with_one_post_read_failure(self: Path, *, follow_symlinks: bool = True):
+        nonlocal first_stat_calls
+        if self == first:
+            first_stat_calls += 1
+            if fail_post_read and first_stat_calls == 2:
+                raise OSError("transient metadata failure")
+        return original_stat(self, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", stat_with_one_post_read_failure)
+    store = Store(tmp_path / "b.db")
+
+    first_pass = store.aggregate_jsonl(root)
+    fail_post_read = False
+    second_pass = store.aggregate_jsonl(root)
+
+    assert first_pass.scan_succeeded is False
+    assert second_pass.emitted == 0
+    totals = dict(store.attribution_totals(168, now=now)["by_project"])
+    assert totals == {"/work/second": 20, "/work/first": 10}
 
 
 def test_a_non_boolean_sidechain_flag_is_not_a_subagent():
