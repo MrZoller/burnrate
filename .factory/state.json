@@ -3,9 +3,9 @@
   "phase": "build",
   "spec_approved": true,
   "plan_approved": true,
-  "current_task": "T4",
-  "branch": "factory/t4-handle-non-utf8-paths",
-  "pr": 29,
+  "current_task": null,
+  "branch": null,
+  "pr": null,
   "hold": false,
-  "updated": "2026-08-19T03:37:23Z"
+  "updated": "2026-08-19T03:51:00Z"
 }
