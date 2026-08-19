@@ -301,7 +301,7 @@ def test_prune_drops_only_old_rows(store, live_response):
 
 
 @pytest.fixture
-def make_client(tmp_path, live_response, monkeypatch):
+def make_client(tmp_path, live_response_at, monkeypatch):
     """Builds an app whose poller never runs, seeded at a chosen sample age."""
     monkeypatch.setattr("burnrate.poller.Poller.start", _noop)
     monkeypatch.setattr("burnrate.poller.Poller.stop", _noop)
@@ -312,7 +312,8 @@ def make_client(tmp_path, live_response, monkeypatch):
         config = Config(db_path=tmp_path / f"api{counter['n']}.db", poll_interval=poll_interval)
         app = create_app(config)
         fetched_at = datetime.now(UTC) - timedelta(seconds=age_seconds)
-        app.state.store.append_snapshot(parse_usage(live_response, fetched_at=fetched_at))
+        payload = live_response_at(fetched_at)
+        app.state.store.append_snapshot(parse_usage(payload, fetched_at=fetched_at))
         return TestClient(app)
 
     return _build
@@ -363,6 +364,18 @@ def test_now_includes_a_projection(client):
 
     assert body["projection"]["bucket_key"] == "seven_day"
     assert body["projection"]["status"] in {"projected", "clears_reset", "insufficient_data"}
+
+
+def test_the_seeded_window_outruns_the_calendar(live_response_at):
+    """Regression: the capture's `resets_at` values are absolute, so seeding the
+    store with them verbatim took the projection to "unavailable" the moment the
+    calendar overtook them -- the suite failed by date, not by regression."""
+    far_future = datetime.now(UTC) + timedelta(days=3650)
+
+    payload = live_response_at(far_future)
+
+    for key in ("five_hour", "seven_day"):
+        assert datetime.fromisoformat(payload[key]["resets_at"]) > far_future
 
 
 def test_known_buckets_carry_a_window_opened_at_one_period_before_the_reset(client):
