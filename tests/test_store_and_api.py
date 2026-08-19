@@ -505,5 +505,6 @@ def test_static_attribution_health_markup_and_wiring_are_served(client):
     assert 'aria-live="polite"' in page
     assert 'attrHealth: document.getElementById("attr-health")' in script
     assert "renderAttributionHealth(data && data.aggregation);" in script
+    assert "Counts generated" in script
     assert "Transcript aggregation failed; showing counts generated" in script
     assert "Attribution is stale; showing counts generated" in script

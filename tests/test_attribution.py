@@ -951,10 +951,18 @@ async def test_attribution_endpoint_exposes_stale_and_failed_aggregation_health(
     client = attribution_client()
     poller = client.app.state.poller
     now = datetime.now(UTC)
-    poller.attribution_status.last_success_at = now - timedelta(seconds=1801)
-    poller.attribution_status.last_attempt_at = now - timedelta(seconds=1800)
 
     with client:
+        await poller._maybe_aggregate(now)
+        fresh = client.get("/api/attribution").json()["aggregation"]
+
+        assert fresh["healthy"] is True
+        assert fresh["stale"] is False
+        assert fresh["staleness_seconds"] is not None
+        assert 0 <= fresh["staleness_seconds"] < 5
+
+        poller.attribution_status.last_success_at = now - timedelta(seconds=1801)
+        poller.attribution_status.last_attempt_at = now - timedelta(seconds=1800)
         stale = client.get("/api/attribution").json()["aggregation"]
 
         assert stale["healthy"] is False
@@ -970,7 +978,7 @@ async def test_attribution_endpoint_exposes_stale_and_failed_aggregation_health(
             raise RuntimeError("corrupt transcript tree: /private/logs")
 
         monkeypatch.setattr(client.app.state.store, "aggregate_jsonl", boom)
-        await poller._maybe_aggregate(datetime.now(UTC))
+        await poller._maybe_aggregate(now + timedelta(minutes=10))
         response = client.get("/api/attribution")
         failed = response.json()["aggregation"]
 
