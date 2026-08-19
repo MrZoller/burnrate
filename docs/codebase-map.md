@@ -62,8 +62,8 @@ runs its blocking reads on worker threads — see `poller.py:378` for the
 ```
 uvicorn (__main__) ──> Poller._run (background task)
    Poller.poll_once (every interval; survives any single failure):
-     1. prune old rows (every 6h)
-     2. aggregate local attribution (every 10 min, worker thread, before fetch)
+     1. prune old rows (min gate 6h — poll-driven, see below)
+     2. aggregate local attribution (min gate 10 min, worker thread, before fetch)
      3. read_credential from scratch (worker thread; keychain then file)
      4. fetch_usage (GET api.anthropic.com/api/oauth/usage, Bearer + anthropic-beta)
          └─ on 401, re-read credential once; if unchanged -> record failure
@@ -71,7 +71,14 @@ uvicorn (__main__) ──> Poller._run (background task)
      5. parse_usage -> UsageSnapshot (never raises; warns/notices on drift)
      6. store.append_snapshot(snapshot, raw_body) -> samples + deduped raw_snapshots
      7. poller.snapshot + status updated
-   └─ any failure -> _record_failure (backoff doubles up to 900s; honors 429 Retry-After ≤1h)
+   └─ any failure -> _record_failure (backoff doubles up to max(900s, interval);
+        a 429's Retry-After wins when larger, itself clamped to 1h)
+
+   Steps 1 and 2 are POLL-DRIVEN: _maybe_prune/_maybe_aggregate are called only
+   from poll_once, so their intervals are minimum gates, not schedules. The
+   effective cadence is max(gate, current poll delay) — a long configured
+   interval or a backed-off outage stretches both, so local attribution is not
+   10-minute fresh under those conditions.
 ```
 
 `/api/now` (`app.py:66`) reads the **live** `poller.snapshot` when present, else

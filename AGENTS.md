@@ -119,7 +119,10 @@ worklog, questions).
   interval)` — never more aggressive than normal polling, which a flat 900s cap
   got backwards for any interval above it — and a 429's `Retry-After` wins
   whenever it is larger, including past that ceiling (the header itself is
-  clamped to 1h). Prunes every 6h, rolls up attribution every 10 minutes. Anything that could throw is wrapped — the poll loop must outlive any
+  clamped to 1h). Prune and attribution rollup are POLL-DRIVEN — `_maybe_prune`
+  and `_maybe_aggregate` are called only from `poll_once`, so their 6h and 10min
+  intervals are minimum gates and the real cadence is `max(gate, current poll
+  delay)`; a long interval or a backed-off outage stretches both. Anything that could throw is wrapped — the poll loop must outlive any
   single failure (see the repeated `noqa: BLE001` comments).
 - The API binds `0.0.0.0` by default and is served from any LAN/Tailscale
   client; there is no auth on the dashboard itself. The exposure is the point
