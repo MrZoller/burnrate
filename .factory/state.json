@@ -3,9 +3,9 @@
   "phase": "build",
   "spec_approved": true,
   "plan_approved": true,
-  "current_task": "T5",
-  "branch": "factory/t5-concurrent-attribution",
-  "pr": 31,
+  "current_task": null,
+  "branch": null,
+  "pr": null,
   "hold": false,
-  "updated": "2026-08-19T04:06:59Z"
+  "updated": "2026-08-19T04:11:04Z"
 }
