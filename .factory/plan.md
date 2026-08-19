@@ -25,11 +25,12 @@ related-issue references; only explicit prerequisites would constrain selection.
 - [x] T5 (standard) — poller: run attribution aggregation concurrently with the fetch so the first scan does not delay the usage meter (follow-up to #16) (Fixes #22)
   - acceptance: a slow first attribution scan does not delay the remote usage fetch in `poller.py`; aggregation still runs when fetching fails; tests preserve `now`/`fetched_at`, Retry-After, 429, and backoff behavior
   - pr: 31
-- [~] T6 (standard) — attribution: surface aggregation freshness / health so a stalled aggregator does not serve stale rollups as current (follow-up to #16) (Fixes #21)
+- [x] T6 (standard) — attribution: surface aggregation freshness / health so a stalled aggregator does not serve stale rollups as current (follow-up to #16) (Fixes #21)
   - acceptance: the last successful aggregation time is exposed by `/api/attribution` and is not advanced by a failed aggregation; the static attribution panel labels when counts were generated and visibly reports a persistently failed/stale aggregator instead of presenting frozen rollups as current; poller/API tests cover success and failure, with the UI behavior manually verified
+  - pr: 32
 - [!] T7 (standard) — dashboard: "Ahead of pace" (amber) pace tier is unreachable under linear projection (follow-up to #15) (Fixes #18)
   - acceptance: human must define the amber tier's testable product semantics or explicitly remove it from the projection/API/dashboard vocabulary in Q4
-- [ ] T8 (trivial) — dashboard: details-table status word is not staleness-aware (follow-up to #5) (Fixes #13)
+- [~] T8 (trivial) — dashboard: details-table status word is not staleness-aware (follow-up to #5) (Fixes #13)
   - acceptance: `renderTable` receives snapshot staleness on success and outage paths; stale rows retain numeric details but show no live Healthy/Watch/Critical judgment or live color carrier; regression coverage verifies the static-page wiring
 - [ ] T9 (trivial) — dashboard: refreshHistory() has the same newest-issued starvation as refresh() (#4) (Fixes #11)
   - acceptance: `refreshHistory()` applies any response newer than the last rendered history response even when a later request is already in flight, discards genuinely older successes and failures, and preserves range-change/error behavior; overlapping-request behavior is regression-verified in `src/burnrate/static/app.js`

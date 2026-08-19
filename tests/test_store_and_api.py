@@ -508,3 +508,18 @@ def test_static_attribution_health_markup_and_wiring_are_served(client):
     assert "Counts generated" in script
     assert "Transcript aggregation failed; showing counts generated" in script
     assert "Attribution is stale; showing counts generated" in script
+
+
+def test_static_table_staleness_wiring_is_served(client):
+    """A retained snapshot must not leave a live pace verdict in the details table."""
+    script = client.get("/app.js").text
+    table = script.split("function renderTable(buckets, stale) {", 1)[1].split(
+        "/* --------------------------------------------------------------------- hero */", 1
+    )[0]
+
+    assert 'el("td", { text: pct(bucket.utilization) })' in table
+    assert 'el("td", { text: stale ? "Stale" : bucket.pace_label || "Unknown" })' in table
+    assert "class:" not in table
+    assert "style:" not in table
+    assert "renderTable(state.buckets, data.stale === true);" in script
+    assert "renderTable(state.buckets, true);" in script
