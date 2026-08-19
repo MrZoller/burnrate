@@ -163,13 +163,24 @@ These are enforced by tests and must survive any change:
 
 1. **The OAuth token never leaves the server.** Never in a response, never in
    the DB, never in logs. Test: `test_no_endpoint_leaks_the_token`
-   (`test_store_and_api.py:447`) and the `test_a_credential_in_the_response_never_survives_parsing`
+   (`test_store_and_api.py:460`) and the `test_a_credential_in_the_response_never_survives_parsing`
    family (`test_usage.py:132`).
 2. **Scrubbing is centralized in `redact.py`** (`scrub`, `scrub_json`). Add new
-   diagnostic paths *through* it, never around it. The exact token is scrubbed at
-   the one point that holds it (`poller.py:_fetch_with_one_auth_retry`); the
-   `sk-ant-` regex in `redact.py` is the backstop for credentials the code never
-   held, and is deliberately broader than a parse.
+   diagnostic paths *through* it, never around it. TWO layers hold the exact
+   token and each must pass it in — this is not a single choke point:
+   - `poller.py:_fetch_with_one_auth_retry` scrubs the successful payload
+     (`scrub_json(payload, credential.access_token)`).
+   - `client.py` scrubs every error it raises and the archived body excerpt
+     (`scrub(..., access_token)`, `_short_body(response, access_token)`), on the
+     transport, HTTP, auth and protocol paths. An upstream echoing the token
+     back in an error body would otherwise leak it into the exception, the logs
+     and the raw-snapshot archive at once.
+
+   The `sk-ant-` regex in `redact.py` is the backstop for credentials the code
+   never held, and is deliberately broader than a parse. It is **not** a
+   substitute for passing the exact token on either layer: a new diagnostic path
+   that relies on the heuristic alone will miss any token that does not match
+   it.
 3. **No refresh flow. Ever.** Claude Code owns the credential; a 401 means
    "stale", not "renew". Re-read on every poll picks up rotations automatically.
 4. **The token is not in `Credential.__repr__`** (`credentials.py:47`,
