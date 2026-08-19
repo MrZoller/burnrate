@@ -422,13 +422,13 @@ def test_a_surrogate_bearing_jsonl_path_commits_and_is_watermarked(tmp_path, mon
     )
     reads: list[int] = []
 
-    monkeypatch.setattr(attribution, "iter_jsonl_files", lambda _: [path])
+    monkeypatch.setattr(attribution, "scan_jsonl_files", lambda _: ([path], True))
 
-    def read_once(_: Path, offset: int) -> tuple[list[str], int]:
+    def read_once(_: Path, offset: int) -> tuple[list[str], int, bool]:
         reads.append(offset)
-        return ([line], 1) if offset == 0 else ([], offset)
+        return ([line], 1, True) if offset == 0 else ([], offset, True)
 
-    monkeypatch.setattr(attribution, "read_new_lines", read_once)
+    monkeypatch.setattr(attribution, "read_new_lines_with_health", read_once)
     original_stat = Path.stat
 
     def stat_with_surrogate_path(self: Path, *, follow_symlinks: bool = True):
@@ -463,12 +463,12 @@ def test_distinct_surrogate_paths_keep_sqlite_identities(tmp_path, monkeypatch):
         second: _assistant(ts=now, session=None, input_tokens=13),
     }
 
-    monkeypatch.setattr(attribution, "iter_jsonl_files", lambda _: [first, second])
+    monkeypatch.setattr(attribution, "scan_jsonl_files", lambda _: ([first, second], True))
 
-    def read_once(path: Path, offset: int) -> tuple[list[str], int]:
-        return ([lines[path]], 1) if offset == 0 else ([], offset)
+    def read_once(path: Path, offset: int) -> tuple[list[str], int, bool]:
+        return ([lines[path]], 1, True) if offset == 0 else ([], offset, True)
 
-    monkeypatch.setattr(attribution, "read_new_lines", read_once)
+    monkeypatch.setattr(attribution, "read_new_lines_with_health", read_once)
     original_stat = Path.stat
 
     def stat_with_surrogate_paths(self: Path, *, follow_symlinks: bool = True):
@@ -489,6 +489,46 @@ def test_distinct_surrogate_paths_keep_sqlite_identities(tmp_path, monkeypatch):
     assert len(sessions) == 2
     assert {session["total_tokens"] for session in sessions} == {61, 63}
     assert all(session["session_id"].startswith("unknown:") for session in sessions)
+
+
+def test_post_read_stat_failure_keeps_aggregated_turns_watermarked(tmp_path, monkeypatch):
+    """A failed metadata refresh must not make already-folded bytes re-readable."""
+    now = datetime.now(UTC)
+    root = _tree(
+        tmp_path / "projects",
+        {
+            "first.jsonl": [
+                _assistant(cwd="/work/first", input_tokens=10, output_tokens=0, ts=now)
+            ],
+            "second.jsonl": [
+                _assistant(cwd="/work/second", input_tokens=20, output_tokens=0, ts=now)
+            ],
+        },
+    )
+    first = root / "proj-0" / "first.jsonl"
+    original_stat = Path.stat
+    first_stat_calls = 0
+    fail_post_read = True
+
+    def stat_with_one_post_read_failure(self: Path, *, follow_symlinks: bool = True):
+        nonlocal first_stat_calls
+        if self == first:
+            first_stat_calls += 1
+            if fail_post_read and first_stat_calls == 2:
+                raise OSError("transient metadata failure")
+        return original_stat(self, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", stat_with_one_post_read_failure)
+    store = Store(tmp_path / "b.db")
+
+    first_pass = store.aggregate_jsonl(root)
+    fail_post_read = False
+    second_pass = store.aggregate_jsonl(root)
+
+    assert first_pass.scan_succeeded is False
+    assert second_pass.emitted == 0
+    totals = dict(store.attribution_totals(168, now=now)["by_project"])
+    assert totals == {"/work/second": 20, "/work/first": 10}
 
 
 def test_a_non_boolean_sidechain_flag_is_not_a_subagent():
@@ -662,6 +702,27 @@ def test_read_new_lines_keeps_a_record_with_a_raw_unicode_line_separator(tmp_pat
 
 def test_iter_jsonl_files_is_empty_for_a_missing_root(tmp_path):
     assert attribution.iter_jsonl_files(tmp_path / "does-not-exist") == []
+
+
+def test_scan_jsonl_files_reports_a_skipped_directory(tmp_path, monkeypatch):
+    """A partial walk must not let the poller report an incomplete rollup as fresh."""
+    root = tmp_path / "projects"
+    root.mkdir()
+    readable = root / "readable"
+
+    def walk_with_unreadable_directory(path, *, onerror, followlinks):
+        assert path == root
+        assert followlinks is False
+        yield root, ["readable", "locked"], []
+        yield readable, [], ["session.jsonl"]
+        onerror(PermissionError("locked subtree"))
+
+    monkeypatch.setattr(attribution.os, "walk", walk_with_unreadable_directory)
+
+    paths, scan_succeeded = attribution.scan_jsonl_files(root)
+
+    assert paths == [readable / "session.jsonl"]
+    assert scan_succeeded is False
 
 
 # --------------------------------------------------------------- rollup
@@ -943,6 +1004,60 @@ def test_attribution_endpoint_is_empty_but_valid_with_no_data(attribution_client
     assert body["scope"] == ATTRIBUTION_SCOPE  # scope is present even with no data
     assert body["by_project"] == []
     assert body["top_sessions"] == []
+
+
+async def test_attribution_endpoint_exposes_stale_and_failed_aggregation_health(
+    attribution_client, monkeypatch
+):
+    client = attribution_client()
+    poller = client.app.state.poller
+    now = datetime.now(UTC)
+
+    with client:
+        await poller._maybe_aggregate(now)
+        fresh = client.get("/api/attribution").json()["aggregation"]
+
+        assert fresh["healthy"] is True
+        assert fresh["stale"] is False
+        assert fresh["staleness_seconds"] is not None
+        assert 0 <= fresh["staleness_seconds"] < 5
+
+        poller.attribution_status.last_success_at = now - timedelta(seconds=1801)
+        poller.attribution_status.last_attempt_at = now - timedelta(seconds=1800)
+        stale = client.get("/api/attribution").json()["aggregation"]
+
+        assert stale["healthy"] is False
+        assert stale["stale"] is True
+        assert stale["staleness_seconds"] == pytest.approx(1801, abs=5)
+        assert stale["stale_after_seconds"] == 1800.0
+        assert stale["consecutive_failures"] == 0
+
+        # A failed pass must expose its health state, but not its raw exception text.
+        poller.attribution_status.last_success_at = datetime.now(UTC)
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("corrupt transcript tree: /private/logs")
+
+        monkeypatch.setattr(client.app.state.store, "aggregate_jsonl", boom)
+        await poller._maybe_aggregate(now + timedelta(minutes=10))
+        response = client.get("/api/attribution")
+        failed = response.json()["aggregation"]
+
+    assert failed["healthy"] is False
+    assert failed["stale"] is True
+    assert failed["consecutive_failures"] == 1
+    assert failed["last_success_at"] is not None
+    assert failed["last_attempt_at"] is not None
+    assert "corrupt transcript tree" not in response.text
+    assert set(failed) == {
+        "healthy",
+        "stale",
+        "staleness_seconds",
+        "stale_after_seconds",
+        "last_success_at",
+        "last_attempt_at",
+        "consecutive_failures",
+    }
 
 
 def test_attribution_endpoint_defaults_an_unknown_window(attribution_client):

@@ -145,6 +145,7 @@ class AggregateStats:
     lines: int = 0
     malformed: int = 0
     emitted: int = 0
+    scan_succeeded: bool = True
 
 
 @dataclass
@@ -392,7 +393,10 @@ class Store:
         offsets: dict[str, tuple[int, int | None, float | None]] = {}
         stats = AggregateStats()
 
-        for path in attribution.iter_jsonl_files(root):
+        # The scan is the iteration: making a second traversal would let a disappearing
+        # root turn a successful discovery into an empty, falsely fresh aggregation.
+        paths, stats.scan_succeeded = attribution.scan_jsonl_files(root)
+        for path in paths:
             stats.files_scanned += 1
             # Filesystem APIs preserve undecodable bytes as surrogate-bearing strings.
             # SQLite's Python adapter cannot bind those strings, so repair every
@@ -409,7 +413,12 @@ class Store:
             # Drain this file in bounded chunks; each read_new_lines returns whole lines
             # and advances the offset, and returns none once only a partial line remains.
             while True:
-                lines, new_offset = attribution.read_new_lines(path, offset)
+                lines, new_offset, read_succeeded = attribution.read_new_lines_with_health(
+                    path, offset
+                )
+                if not read_succeeded:
+                    stats.scan_succeeded = False
+                    break
                 if not lines:
                     break
                 saw_new = True
@@ -431,7 +440,11 @@ class Store:
                 info = path.stat()
                 offsets[key] = (offset, info.st_size, info.st_mtime)
             except OSError:
+                # The file disappeared or became unreadable after we consumed it. Do not
+                # report this pass as fresh, but retain its consumed offset in the same
+                # transaction as its folds so a later retry cannot double-count it.
                 offsets[key] = (offset, None, None)
+                stats.scan_succeeded = False
 
         if not offsets:
             return stats

@@ -22,9 +22,10 @@ related-issue references; only explicit prerequisites would constrain selection.
 - [x] T4 (standard) — attribution: a non-UTF-8 filename freezes aggregation via the watermark/session-fallback binds (follow-up to #16) (Fixes #23)
   - acceptance: `aggregate_jsonl` commits a surrogate-bearing path and advances its watermark without `UnicodeEncodeError`; the session fallback is SQLite-bindable; a second unchanged pass reads no new rows or double-counts; tests cover both path-derived bind sites in `store.py`/`attribution.py`
   - pr: 29
-- [~] T5 (standard) — poller: run attribution aggregation concurrently with the fetch so the first scan does not delay the usage meter (follow-up to #16) (Fixes #22)
+- [x] T5 (standard) — poller: run attribution aggregation concurrently with the fetch so the first scan does not delay the usage meter (follow-up to #16) (Fixes #22)
   - acceptance: a slow first attribution scan does not delay the remote usage fetch in `poller.py`; aggregation still runs when fetching fails; tests preserve `now`/`fetched_at`, Retry-After, 429, and backoff behavior
-- [ ] T6 (standard) — attribution: surface aggregation freshness / health so a stalled aggregator does not serve stale rollups as current (follow-up to #16) (Fixes #21)
+  - pr: 31
+- [~] T6 (standard) — attribution: surface aggregation freshness / health so a stalled aggregator does not serve stale rollups as current (follow-up to #16) (Fixes #21)
   - acceptance: the last successful aggregation time is exposed by `/api/attribution` and is not advanced by a failed aggregation; the static attribution panel labels when counts were generated and visibly reports a persistently failed/stale aggregator instead of presenting frozen rollups as current; poller/API tests cover success and failure, with the UI behavior manually verified
 - [!] T7 (standard) — dashboard: "Ahead of pace" (amber) pace tier is unreachable under linear projection (follow-up to #15) (Fixes #18)
   - acceptance: human must define the amber tier's testable product semantics or explicitly remove it from the projection/API/dashboard vocabulary in Q4

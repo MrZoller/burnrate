@@ -493,3 +493,18 @@ def test_index_is_served_at_the_root(client):
 
     assert response.status_code == 200
     assert "burnrate" in response.text
+
+
+def test_static_attribution_health_markup_and_wiring_are_served(client):
+    """The page has no JS harness, so pin the shipped DOM and the health render paths."""
+    page = client.get("/").text
+    script = client.get("/app.js").text
+
+    assert 'id="attr-health"' in page
+    assert 'role="status"' in page
+    assert 'aria-live="polite"' in page
+    assert 'attrHealth: document.getElementById("attr-health")' in script
+    assert "renderAttributionHealth(data && data.aggregation);" in script
+    assert "Counts generated" in script
+    assert "Transcript aggregation failed; showing counts generated" in script
+    assert "Attribution is stale; showing counts generated" in script
