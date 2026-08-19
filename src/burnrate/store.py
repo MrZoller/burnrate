@@ -145,6 +145,7 @@ class AggregateStats:
     lines: int = 0
     malformed: int = 0
     emitted: int = 0
+    scan_succeeded: bool = True
 
 
 @dataclass
@@ -392,7 +393,14 @@ class Store:
         offsets: dict[str, tuple[int, int | None, float | None]] = {}
         stats = AggregateStats()
 
-        for path in attribution.iter_jsonl_files(root):
+        # Keep the public iterator as the seam for tests and callers that substitute a
+        # synthetic transcript list. The paired scan tells production whether that list
+        # was obtainable at all; a non-empty substituted list is necessarily usable.
+        discovered_paths, stats.scan_succeeded = attribution.scan_jsonl_files(root)
+        paths = attribution.iter_jsonl_files(root)
+        if paths and not discovered_paths:
+            stats.scan_succeeded = True
+        for path in paths:
             stats.files_scanned += 1
             # Filesystem APIs preserve undecodable bytes as surrogate-bearing strings.
             # SQLite's Python adapter cannot bind those strings, so repair every
@@ -409,7 +417,12 @@ class Store:
             # Drain this file in bounded chunks; each read_new_lines returns whole lines
             # and advances the offset, and returns none once only a partial line remains.
             while True:
-                lines, new_offset = attribution.read_new_lines(path, offset)
+                lines, new_offset, read_succeeded = attribution.read_new_lines_with_health(
+                    path, offset
+                )
+                if not read_succeeded:
+                    stats.scan_succeeded = False
+                    break
                 if not lines:
                     break
                 saw_new = True
@@ -431,7 +444,9 @@ class Store:
                 info = path.stat()
                 offsets[key] = (offset, info.st_size, info.st_mtime)
             except OSError:
-                offsets[key] = (offset, None, None)
+                # The file disappeared or became unreadable after we consumed it. Do not
+                # advance its watermark while reporting this pass as a fresh rollup.
+                stats.scan_succeeded = False
 
         if not offsets:
             return stats

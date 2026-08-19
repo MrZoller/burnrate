@@ -196,15 +196,25 @@ def turn_from_record(record: dict) -> Turn | None:
     )
 
 
-def iter_jsonl_files(root: Path | str) -> list[Path]:
-    """Every ``*.jsonl`` under ``root``, sorted; empty if ``root`` does not exist."""
+def scan_jsonl_files(root: Path | str) -> tuple[list[Path], bool]:
+    """Return sorted JSONLs and whether the filesystem scan completed cleanly.
+
+    An empty, readable projects directory is a valid scan. A missing root or an
+    ``OSError`` is not: callers that report freshness must not mistake an
+    inaccessible corpus for a successful no-op refresh.
+    """
     root = Path(root)
     if not root.is_dir():
-        return []
+        return [], False
     try:
-        return sorted(root.rglob("*.jsonl"))
+        return sorted(root.rglob("*.jsonl")), True
     except OSError:
-        return []
+        return [], False
+
+
+def iter_jsonl_files(root: Path | str) -> list[Path]:
+    """Every ``*.jsonl`` under ``root``, sorted; empty if it cannot be scanned."""
+    return scan_jsonl_files(root)[0]
 
 
 def read_new_lines(
@@ -220,11 +230,19 @@ def read_new_lines(
     read whole so progress is guaranteed. Any OS error yields no lines and the offset
     unchanged, so a transient read failure simply retries next run.
     """
+    lines, new_offset, _ = read_new_lines_with_health(path, offset, max_bytes)
+    return lines, new_offset
+
+
+def read_new_lines_with_health(
+    path: Path | str, offset: int, max_bytes: int = MAX_READ_BYTES
+) -> tuple[list[str], int, bool]:
+    """Like :func:`read_new_lines`, additionally reporting filesystem read health."""
     path = Path(path)
     try:
         size = path.stat().st_size
     except OSError:
-        return [], offset
+        return [], offset, False
     if offset > size:
         # The file is SMALLER than where we last read, so restart from the beginning.
         # Claude Code transcripts are append-only -- they only ever grow -- so in
@@ -234,7 +252,7 @@ def read_new_lines(
         # it cannot arise under the append-only assumption this subsystem is built on.
         offset = 0
     if offset >= size:
-        return [], offset
+        return [], offset, True
     try:
         with path.open("rb") as handle:
             handle.seek(offset)
@@ -252,11 +270,11 @@ def read_new_lines(
                     break
             data = b"".join(chunks)
     except OSError:
-        return [], offset
+        return [], offset, False
 
     last_newline = data.rfind(b"\n")
     if last_newline == -1:
-        return [], offset  # no complete line appended yet
+        return [], offset, True  # no complete line appended yet
     consumed = data[: last_newline + 1]
     new_offset = offset + len(consumed)
     text = consumed.decode("utf-8", errors="replace")
@@ -270,7 +288,7 @@ def read_new_lines(
     lines = text.split("\n")
     if lines and lines[-1] == "":
         lines.pop()
-    return lines, new_offset
+    return lines, new_offset, True
 
 
 def _non_negative_int(value: object) -> int:

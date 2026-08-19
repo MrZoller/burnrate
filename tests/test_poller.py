@@ -497,6 +497,19 @@ async def test_failed_aggregation_preserves_the_last_success_and_counts_failure(
     assert poller.attribution_status.consecutive_failures == 3
 
 
+async def test_missing_transcript_root_preserves_last_success_and_marks_stale(store, tmp_path):
+    """A vanished corpus is not a successful empty refresh of existing rollups."""
+    previous_success = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
+    poller = Poller(store, projects_dir=tmp_path / "gone")
+    poller.attribution_status.last_success_at = previous_success
+
+    await poller._maybe_aggregate(previous_success + timedelta(minutes=10))
+
+    assert poller.attribution_status.last_success_at == previous_success
+    assert poller.attribution_status.consecutive_failures == 1
+    assert not poller.attribution_status_dict(previous_success + timedelta(minutes=10))["healthy"]
+
+
 async def test_attribution_is_disabled_without_a_projects_dir(store, monkeypatch, live_response):
     _credentials(monkeypatch, "tok")
     _fetches(monkeypatch, lambda token, n: live_response)

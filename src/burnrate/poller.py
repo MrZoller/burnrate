@@ -381,6 +381,14 @@ class Poller:
         self.attribution_status.last_attempt_at = now
         try:
             stats = await asyncio.to_thread(self.store.aggregate_jsonl, self._projects_dir)
+            if not stats.scan_succeeded:
+                # Tolerant transcript parsing deliberately absorbs filesystem errors so
+                # one bad path cannot kill polling. They are still failed refreshes: the
+                # UI must retain the last known-good timestamp rather than call frozen
+                # rollups current.
+                self.attribution_status.consecutive_failures += 1
+                logger.warning("attribution aggregation could not scan every transcript path")
+                return
             # This is the completion time, not the poll's start: a first scan can take
             # minutes, so using its start would overstate the age of the refreshed counts.
             self.attribution_status.last_success_at = datetime.now(UTC)

@@ -424,11 +424,11 @@ def test_a_surrogate_bearing_jsonl_path_commits_and_is_watermarked(tmp_path, mon
 
     monkeypatch.setattr(attribution, "iter_jsonl_files", lambda _: [path])
 
-    def read_once(_: Path, offset: int) -> tuple[list[str], int]:
+    def read_once(_: Path, offset: int) -> tuple[list[str], int, bool]:
         reads.append(offset)
-        return ([line], 1) if offset == 0 else ([], offset)
+        return ([line], 1, True) if offset == 0 else ([], offset, True)
 
-    monkeypatch.setattr(attribution, "read_new_lines", read_once)
+    monkeypatch.setattr(attribution, "read_new_lines_with_health", read_once)
     original_stat = Path.stat
 
     def stat_with_surrogate_path(self: Path, *, follow_symlinks: bool = True):
@@ -465,10 +465,10 @@ def test_distinct_surrogate_paths_keep_sqlite_identities(tmp_path, monkeypatch):
 
     monkeypatch.setattr(attribution, "iter_jsonl_files", lambda _: [first, second])
 
-    def read_once(path: Path, offset: int) -> tuple[list[str], int]:
-        return ([lines[path]], 1) if offset == 0 else ([], offset)
+    def read_once(path: Path, offset: int) -> tuple[list[str], int, bool]:
+        return ([lines[path]], 1, True) if offset == 0 else ([], offset, True)
 
-    monkeypatch.setattr(attribution, "read_new_lines", read_once)
+    monkeypatch.setattr(attribution, "read_new_lines_with_health", read_once)
     original_stat = Path.stat
 
     def stat_with_surrogate_paths(self: Path, *, follow_symlinks: bool = True):
