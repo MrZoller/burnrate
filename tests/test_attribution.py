@@ -945,6 +945,52 @@ def test_attribution_endpoint_is_empty_but_valid_with_no_data(attribution_client
     assert body["top_sessions"] == []
 
 
+async def test_attribution_endpoint_exposes_stale_and_failed_aggregation_health(
+    attribution_client, monkeypatch
+):
+    client = attribution_client()
+    poller = client.app.state.poller
+    now = datetime.now(UTC)
+    poller.attribution_status.last_success_at = now - timedelta(seconds=1801)
+    poller.attribution_status.last_attempt_at = now - timedelta(seconds=1800)
+
+    with client:
+        stale = client.get("/api/attribution").json()["aggregation"]
+
+        assert stale["healthy"] is False
+        assert stale["stale"] is True
+        assert stale["staleness_seconds"] == pytest.approx(1801, abs=5)
+        assert stale["stale_after_seconds"] == 1800.0
+        assert stale["consecutive_failures"] == 0
+
+        # A failed pass must expose its health state, but not its raw exception text.
+        poller.attribution_status.last_success_at = datetime.now(UTC)
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("corrupt transcript tree: /private/logs")
+
+        monkeypatch.setattr(client.app.state.store, "aggregate_jsonl", boom)
+        await poller._maybe_aggregate(datetime.now(UTC))
+        response = client.get("/api/attribution")
+        failed = response.json()["aggregation"]
+
+    assert failed["healthy"] is False
+    assert failed["stale"] is True
+    assert failed["consecutive_failures"] == 1
+    assert failed["last_success_at"] is not None
+    assert failed["last_attempt_at"] is not None
+    assert "corrupt transcript tree" not in response.text
+    assert set(failed) == {
+        "healthy",
+        "stale",
+        "staleness_seconds",
+        "stale_after_seconds",
+        "last_success_at",
+        "last_attempt_at",
+        "consecutive_failures",
+    }
+
+
 def test_attribution_endpoint_defaults_an_unknown_window(attribution_client):
     client = attribution_client()
     with client:

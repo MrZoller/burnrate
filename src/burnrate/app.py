@@ -125,7 +125,7 @@ def create_app(config: Config | None = None) -> FastAPI:
         and not aggregated across devices. Read-only; carries token counts, never a
         credential.
         """
-        return JSONResponse(_attribution_payload(store, window))
+        return JSONResponse(_attribution_payload(store, poller, window))
 
     @app.get("/api/healthz")
     def healthz() -> JSONResponse:
@@ -222,7 +222,7 @@ _TOP_N = 8
 ATTRIBUTION_SCOPE = "This machine only — local token counts, not the usage meter."
 
 
-def _attribution_payload(store: Store, window: str) -> dict[str, Any]:
+def _attribution_payload(store: Store, poller: Poller, window: str) -> dict[str, Any]:
     """Assemble the attribution response for one window.
 
     Kept out of the handler so it is a plain, directly testable function. The
@@ -256,6 +256,7 @@ def _attribution_payload(store: Store, window: str) -> dict[str, Any]:
 
     return {
         "generated_at": now.isoformat(),
+        "aggregation": poller.attribution_status_dict(now),
         "window": window,
         "hours": hours,
         "scope": ATTRIBUTION_SCOPE,

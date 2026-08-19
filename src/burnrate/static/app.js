@@ -38,6 +38,7 @@ const els = {
   historyLabel: document.getElementById("history-label"),
   range: document.getElementById("range"),
   attrRange: document.getElementById("attr-range"),
+  attrHealth: document.getElementById("attr-health"),
   attrPanels: document.getElementById("attr-panels"),
   tooltip: document.getElementById("tooltip"),
   footerMeta: document.getElementById("footer-meta"),
@@ -1039,6 +1040,7 @@ async function refreshAttribution() {
     // so fall through and surface the failure rather than swallowing it.
     if (token < appliedAttribution) return;
     appliedAttribution = token;
+    renderAttributionHealth(null, error);
     els.attrPanels.replaceChildren(
       panel("Attribution unavailable", [
         el("div", { class: "panel__empty", text: `Could not load local attribution: ${error.message}` }),
@@ -1122,7 +1124,26 @@ function sessionsPanel(title, note, sessions) {
   ]);
 }
 
+function renderAttributionHealth(aggregation, loadError = null) {
+  const status = aggregation || {};
+  els.attrHealth.classList.toggle("attribution__health--warning", Boolean(loadError) || status.stale);
+  if (loadError) {
+    els.attrHealth.textContent = "Attribution freshness unavailable.";
+  } else if (!status.last_success_at) {
+    els.attrHealth.textContent = status.consecutive_failures
+      ? "Transcript aggregation failed and has not completed successfully yet."
+      : "Waiting for the first successful transcript scan.";
+  } else if (status.consecutive_failures) {
+    els.attrHealth.textContent = `Transcript aggregation failed; showing counts generated ${formatAge(status.staleness_seconds)}.`;
+  } else if (status.stale) {
+    els.attrHealth.textContent = `Attribution is stale; showing counts generated ${formatAge(status.staleness_seconds)}.`;
+  } else {
+    els.attrHealth.textContent = `Counts generated ${formatAge(status.staleness_seconds)}.`;
+  }
+}
+
 function renderAttribution(data) {
+  renderAttributionHealth(data && data.aggregation);
   if (!data || !(Number(data.total_tokens) > 0)) {
     els.attrPanels.replaceChildren(
       panel("No local usage yet", [

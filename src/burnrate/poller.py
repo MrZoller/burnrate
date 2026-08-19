@@ -95,6 +95,34 @@ class PollerStatus:
         }
 
 
+@dataclass
+class AttributionStatus:
+    """Health of the local transcript rollup, separate from remote usage polling."""
+
+    last_success_at: datetime | None = None
+    last_attempt_at: datetime | None = None
+    consecutive_failures: int = 0
+
+    def as_dict(self, *, now: datetime, stale_after_seconds: float) -> dict[str, Any]:
+        staleness = (
+            max(0.0, (now - self.last_success_at).total_seconds())
+            if self.last_success_at is not None
+            else None
+        )
+        stale = (
+            staleness is None or staleness > stale_after_seconds or self.consecutive_failures > 0
+        )
+        return {
+            "healthy": not stale,
+            "stale": stale,
+            "staleness_seconds": staleness,
+            "stale_after_seconds": stale_after_seconds,
+            "last_success_at": _iso(self.last_success_at),
+            "last_attempt_at": _iso(self.last_attempt_at),
+            "consecutive_failures": self.consecutive_failures,
+        }
+
+
 class Poller:
     """Owns the poll loop and the most recent snapshot."""
 
@@ -108,6 +136,7 @@ class Poller:
         self.store = store
         self.interval = interval
         self.status = PollerStatus()
+        self.attribution_status = AttributionStatus()
         self.snapshot: UsageSnapshot | None = None
         self._client = client
         self._owns_client = client is None
@@ -122,6 +151,11 @@ class Poller:
         # None means "no server-set floor", the state after any success or non-429
         # failure, so a stale value can never leak into an unrelated backoff.
         self._retry_after_seconds: float | None = None
+
+    def attribution_status_dict(self, now: datetime) -> dict[str, Any]:
+        """Freshness relative to three missed opportunities to refresh the rollup."""
+        cadence = max(AGGREGATE_EVERY.total_seconds(), self.interval)
+        return self.attribution_status.as_dict(now=now, stale_after_seconds=cadence * 3)
 
     async def start(self) -> None:
         if self._client is None:
@@ -344,8 +378,13 @@ class Poller:
         if self._last_aggregate_at is not None and now - self._last_aggregate_at < AGGREGATE_EVERY:
             return
         self._last_aggregate_at = now
+        self.attribution_status.last_attempt_at = now
         try:
             stats = await asyncio.to_thread(self.store.aggregate_jsonl, self._projects_dir)
+            # This is the completion time, not the poll's start: a first scan can take
+            # minutes, so using its start would overstate the age of the refreshed counts.
+            self.attribution_status.last_success_at = datetime.now(UTC)
+            self.attribution_status.consecutive_failures = 0
             if stats.files_with_new_data:
                 logger.info(
                     "attribution: %d/%d files updated, %d turns, %d malformed lines",
@@ -355,6 +394,8 @@ class Poller:
                     stats.malformed,
                 )
         except Exception:  # noqa: BLE001 - attribution must never kill polling
+            # Keep the previous success time: a failed pass did not refresh the counts.
+            self.attribution_status.consecutive_failures += 1
             logger.exception("attribution aggregation failed")
 
     def _archive_unreadable(self, body: Any, ts: datetime) -> None:

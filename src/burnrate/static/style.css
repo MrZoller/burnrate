@@ -470,6 +470,16 @@ body {
   font-weight: 600;
 }
 
+.attribution__health {
+  margin: -8px 0 16px;
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+
+.attribution__health--warning {
+  color: var(--warning);
+}
+
 .attribution__panels {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));

@@ -451,6 +451,52 @@ async def test_a_failing_aggregation_never_kills_the_poll_loop(
     assert poller.status.healthy
 
 
+async def test_successful_aggregation_records_its_attempt_and_completion(
+    store, monkeypatch, tmp_path
+):
+    """The health timestamp is completion time, so a slow scan is not called fresh early."""
+    from burnrate.store import AggregateStats
+
+    attempt_at = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
+    completed_at = attempt_at + timedelta(minutes=2)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return completed_at
+
+    monkeypatch.setattr(store, "aggregate_jsonl", lambda *args, **kwargs: AggregateStats())
+    monkeypatch.setattr(poller_module, "datetime", Clock)
+    poller = Poller(store, projects_dir=tmp_path)
+
+    await poller._maybe_aggregate(attempt_at)
+
+    assert poller.attribution_status.last_attempt_at == attempt_at
+    assert poller.attribution_status.last_success_at == completed_at
+    assert poller.attribution_status.consecutive_failures == 0
+
+
+async def test_failed_aggregation_preserves_the_last_success_and_counts_failure(
+    store, monkeypatch, tmp_path
+):
+    previous_success = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
+    attempt_at = previous_success + timedelta(minutes=10)
+    poller = Poller(store, projects_dir=tmp_path)
+    poller.attribution_status.last_success_at = previous_success
+    poller.attribution_status.consecutive_failures = 2
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("corrupt transcript tree")
+
+    monkeypatch.setattr(store, "aggregate_jsonl", boom)
+
+    await poller._maybe_aggregate(attempt_at)
+
+    assert poller.attribution_status.last_attempt_at == attempt_at
+    assert poller.attribution_status.last_success_at == previous_success
+    assert poller.attribution_status.consecutive_failures == 3
+
+
 async def test_attribution_is_disabled_without_a_projects_dir(store, monkeypatch, live_response):
     _credentials(monkeypatch, "tok")
     _fetches(monkeypatch, lambda token, n: live_response)
