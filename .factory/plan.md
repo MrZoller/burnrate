@@ -33,7 +33,7 @@ related-issue references; only explicit prerequisites would constrain selection.
 - [x] T8 (trivial) — dashboard: details-table status word is not staleness-aware (follow-up to #5) (Fixes #13)
   - acceptance: `renderTable` receives snapshot staleness on success and outage paths; stale rows retain numeric details but show no live Healthy/Watch/Critical judgment or live color carrier; regression coverage verifies the static-page wiring
   - pr: 33
-- [R] T9 (trivial) — dashboard: refreshHistory() has the same newest-issued starvation as refresh() (#4) (Fixes #11)
+- [x] T9 (trivial) — dashboard: refreshHistory() has the same newest-issued starvation as refresh() (#4) (Fixes #11)
   - acceptance: `refreshHistory()` applies any response newer than the last rendered history response even when a later request is already in flight, discards genuinely older successes and failures, and preserves range-change/error behavior; overlapping-request behavior is regression-verified in `src/burnrate/static/app.js`
   - pr: 34
 
