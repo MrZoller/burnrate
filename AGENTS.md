@@ -115,9 +115,11 @@ worklog, questions).
 - There is **no module-level `app`**: building one at import creates a database
   and a poller as a side effect (this polluted `$HOME` on every test run). Always
   serve through `create_app`.
-- Poller behavior is load-bearing: backoff caps at 900s, honors a 429's
-  `Retry-After` (capped at 1h), prunes every 6h, rolls up attribution every 10
-  minutes. Anything that could throw is wrapped — the poll loop must outlive any
+- Poller behavior is load-bearing: backoff caps at `max(900s, configured
+  interval)` — never more aggressive than normal polling, which a flat 900s cap
+  got backwards for any interval above it — and a 429's `Retry-After` wins
+  whenever it is larger, including past that ceiling (the header itself is
+  clamped to 1h). Prunes every 6h, rolls up attribution every 10 minutes. Anything that could throw is wrapped — the poll loop must outlive any
   single failure (see the repeated `noqa: BLE001` comments).
 - The API binds `0.0.0.0` by default and is served from any LAN/Tailscale
   client; there is no auth on the dashboard itself. The exposure is the point

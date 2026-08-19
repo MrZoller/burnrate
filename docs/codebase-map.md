@@ -115,7 +115,7 @@ basenames collide (`_project_display_names`, `app.py:333`).
 |---|---|---|---|
 | Anthropic usage endpoint | outbound (poll) | `client.py:USAGE_URL` | **Unofficial, no stability guarantee.** `anthropic-beta: oauth-2025-04-20`. This is the whole reason the app's posture is fail-loudly. |
 | Claude Code OAuth credential | read-only | `credentials.py` | keychain (`security find-generic-password`, service `Claude Code-credentials`) then `~/.claude/.credentials.json`. Re-read on every poll. **Never refreshed here.** |
-| Claude Code session transcripts | read-only | `attribution.py`, `store.py` | `~/.claude/projects/**/*.jsonl` (override `BURNRATE_PROJECTS_DIR`). Only assistant turns with usage are read; message bodies never touched. |
+| Claude Code session transcripts | read-only | `attribution.py`, `store.py` | `~/.claude/projects/**/*.jsonl` (override `BURNRATE_PROJECTS_DIR`). Every new record is read and `json.loads`-parsed in full (`parse_lines`), so message bodies **are** materialised in process; only assistant turns with usage are then extracted, and no body is ever persisted, logged, or served. |
 | SQLite (stdlib `sqlite3`) | local | `store.py` | WAL + `synchronous=NORMAL`, per-operation connections. |
 | macOS launchd / LaunchAgent | deploy | `deploy/`, `plist.py` | install/uninstall scripts render the plist via `python -m burnrate.plist` (not `sed`). macOS-only; CI is Ubuntu. |
 | macOS keychain (via `security` binary) | outbound | `credentials.py` | Can pop an interactive authorization prompt on first read. |
