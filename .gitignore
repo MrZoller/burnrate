@@ -230,3 +230,4 @@ data/
 .env
 .env.*
 .claude/settings.local.json
+.factory/logs/
