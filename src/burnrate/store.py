@@ -646,11 +646,17 @@ def _session_fallback(root: Path | str, path: Path) -> str:
 
 
 def _sqlite_text(value: str) -> str:
-    """Repair filesystem strings that SQLite's UTF-8 adapter cannot bind."""
+    """Make a SQLite-bindable, collision-free identity for a filesystem string.
+
+    Python represents undecodable filesystem bytes as surrogate code points. SQLite's
+    UTF-8 adapter cannot bind those directly, so spell each surrogate as a distinct
+    ``\\uXXXX`` escape rather than replacing every one with the same question mark.
+    This keeps watermark and fallback-session identities separate for distinct paths.
+    """
     try:
         value.encode("utf-8")
     except UnicodeEncodeError:
-        return value.encode("utf-8", "replace").decode("utf-8")
+        return value.encode("utf-8", "backslashreplace").decode("utf-8")
     return value
 
 

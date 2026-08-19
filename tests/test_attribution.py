@@ -452,6 +452,45 @@ def test_a_surrogate_bearing_jsonl_path_commits_and_is_watermarked(tmp_path, mon
     assert sessions[0]["total_tokens"] == 10  # unchanged pass did not double-count
 
 
+def test_distinct_surrogate_paths_keep_sqlite_identities(tmp_path, monkeypatch):
+    """Raw filename bytes need distinct watermarks and unknown-session fallbacks."""
+    root = tmp_path / "projects"
+    first = root / "proj-0" / "\ud800session.jsonl"
+    second = root / "proj-0" / "\ud801session.jsonl"
+    now = datetime.now(UTC)
+    lines = {
+        first: _assistant(ts=now, session=None, input_tokens=11),
+        second: _assistant(ts=now, session=None, input_tokens=13),
+    }
+
+    monkeypatch.setattr(attribution, "iter_jsonl_files", lambda _: [first, second])
+
+    def read_once(path: Path, offset: int) -> tuple[list[str], int]:
+        return ([lines[path]], 1) if offset == 0 else ([], offset)
+
+    monkeypatch.setattr(attribution, "read_new_lines", read_once)
+    original_stat = Path.stat
+
+    def stat_with_surrogate_paths(self: Path, *, follow_symlinks: bool = True):
+        if self in lines:
+            return SimpleNamespace(st_size=1, st_mtime=0.0)
+        return original_stat(self, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", stat_with_surrogate_paths)
+    store = Store(tmp_path / "b.db")
+
+    assert store.aggregate_jsonl(root).emitted == 2
+    assert store.aggregate_jsonl(root).emitted == 0
+    with store._connect() as conn:
+        watermark_count = conn.execute("SELECT COUNT(*) FROM jsonl_watermarks").fetchone()[0]
+    sessions = store.attribution_sessions(168, now=now)
+
+    assert watermark_count == 2
+    assert len(sessions) == 2
+    assert {session["total_tokens"] for session in sessions} == {61, 63}
+    assert all(session["session_id"].startswith("unknown:") for session in sessions)
+
+
 def test_a_non_boolean_sidechain_flag_is_not_a_subagent():
     """Codex round 6: isSidechain must be JSON `true` to mean a subagent. bool("false")
     is True, which would misfile a string-flagged main turn under Subagents; `is True`
