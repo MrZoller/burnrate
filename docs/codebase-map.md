@@ -67,7 +67,8 @@ uvicorn (__main__) ──> Poller._run (background task)
      3. read_credential from scratch (worker thread; keychain then file)
      4. fetch_usage (GET api.anthropic.com/api/oauth/usage, Bearer + anthropic-beta)
          └─ on 401, re-read credential once; if unchanged -> record failure
-         └─ payload scrubbed HERE with the exact token (only place that holds one)
+         └─ payload scrubbed HERE with the exact token (one of two exact-token
+            layers; client.py scrubs its own errors + archived body — see Invariants)
      5. parse_usage -> UsageSnapshot (never raises; warns/notices on drift)
      6. store.append_snapshot(snapshot, raw_body) -> samples + deduped raw_snapshots
      7. poller.snapshot + status updated
