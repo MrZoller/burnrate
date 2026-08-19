@@ -704,6 +704,27 @@ def test_iter_jsonl_files_is_empty_for_a_missing_root(tmp_path):
     assert attribution.iter_jsonl_files(tmp_path / "does-not-exist") == []
 
 
+def test_scan_jsonl_files_reports_a_skipped_directory(tmp_path, monkeypatch):
+    """A partial walk must not let the poller report an incomplete rollup as fresh."""
+    root = tmp_path / "projects"
+    root.mkdir()
+    readable = root / "readable"
+
+    def walk_with_unreadable_directory(path, *, onerror, followlinks):
+        assert path == root
+        assert followlinks is False
+        yield root, ["readable", "locked"], []
+        yield readable, [], ["session.jsonl"]
+        onerror(PermissionError("locked subtree"))
+
+    monkeypatch.setattr(attribution.os, "walk", walk_with_unreadable_directory)
+
+    paths, scan_succeeded = attribution.scan_jsonl_files(root)
+
+    assert paths == [readable / "session.jsonl"]
+    assert scan_succeeded is False
+
+
 # --------------------------------------------------------------- rollup
 
 

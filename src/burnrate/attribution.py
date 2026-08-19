@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -206,10 +207,21 @@ def scan_jsonl_files(root: Path | str) -> tuple[list[Path], bool]:
     root = Path(root)
     if not root.is_dir():
         return [], False
+    paths: list[Path] = []
+    errors: list[OSError] = []
+
+    # Path.rglob deliberately suppresses directory-scanning errors on current Python.
+    # A partial traversal is not a fresh rollup: retaining the readable files is useful,
+    # but the caller must keep the previous success timestamp and show the failure.
+    def onerror(error: OSError) -> None:
+        errors.append(error)
+
     try:
-        return sorted(root.rglob("*.jsonl")), True
+        for directory, _, names in os.walk(root, onerror=onerror, followlinks=False):
+            paths.extend(Path(directory) / name for name in names if name.endswith(".jsonl"))
     except OSError:
-        return [], False
+        return paths, False
+    return sorted(paths), not errors
 
 
 def iter_jsonl_files(root: Path | str) -> list[Path]:
