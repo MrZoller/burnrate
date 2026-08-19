@@ -1,5 +1,3 @@
-# Spec: (none yet)
+# Spec: GitHub issue backlog
 
-No spec has been written. Run `/spec <idea>` to draft one. Structure and
-standards live in the `spec-writing` skill; superseded specs are archived to
-`.factory/archive/`.
+Spec = the issue tracker for MrZoller/burnrate; imported 2026-08-19; filter: none.
