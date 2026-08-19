@@ -523,3 +523,18 @@ def test_static_table_staleness_wiring_is_served(client):
     assert "style:" not in table
     assert "renderTable(state.buckets, data.stale === true);" in script
     assert "renderTable(state.buckets, true);" in script
+
+
+def test_static_history_overlap_guard_is_served(client):
+    """History applies completed outcomes without letting old ranges overwrite new ones."""
+    script = client.get("/app.js").text
+    history = script.split("async function refreshHistory() {", 1)[1].split(
+        "/* ------------------------------------------------------ token attribution */", 1
+    )[0]
+
+    assert "let appliedHistory = 0;" in script
+    assert history.count("if (hours !== state.hours) return;") == 2
+    assert "if (token <= appliedHistory) return;" in history
+    assert "if (token < appliedHistory) return;" in history
+    assert history.count("appliedHistory = token;") == 2
+    assert "token !== historyRequest" not in history
