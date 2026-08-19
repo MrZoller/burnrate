@@ -29,17 +29,41 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 1
-      # The checkout above is PR-CONTROLLED, and claude-code-action loads
-      # project hooks from .claude/settings.json and MCP servers from
-      # .mcp.json out of the workspace. Both execute shell OUTSIDE
-      # --allowedTools, so without this a PR that edits either file runs
-      # arbitrary code with CLAUDE_CODE_OAUTH_TOKEN in its environment before
-      # any tool policy applies. The same-repo guard above does not cover it:
-      # it excludes forks, but factory branches are same-repo and agent-authored.
-      # The review needs neither file — prompt and tool permissions come from
-      # this workflow. CLAUDE.md stays: it shapes the prompt and cannot execute.
-      - name: Drop PR-controlled agent configuration
-        run: rm -rf .claude .mcp.json
+      # Everything checked out above is PR-CONTROLLED, and two separate
+      # surfaces make that dangerous while CLAUDE_CODE_OAUTH_TOKEN is in the
+      # action's environment.
+      #
+      # 1. CODE EXECUTION. claude-code-action loads project hooks from
+      #    .claude/settings.json and MCP servers from .mcp.json out of the
+      #    workspace, and both execute shell OUTSIDE --allowedTools. There is
+      #    no trusted counterpart worth restoring, so drop them outright.
+      #
+      # 2. PROMPT INJECTION INTO AN ALLOWED TOOL. CLAUDE.md and AGENTS.md are
+      #    instruction files the reviewer reads. They cannot execute, but they
+      #    do not need to: --allowedTools permits `Bash(gh pr comment:*)`, and
+      #    `gh pr comment --body-file <path>` reads its body from any file the
+      #    runner can read. PR-authored instructions can therefore direct the
+      #    reviewer to post /proc/self/environ — disclosing the long-lived
+      #    OAuth token through a permitted tool. Restore the base branch's
+      #    copies instead of trusting the PR's.
+      #
+      # The same-repo guard above does not cover any of this: it excludes
+      # forks, but factory branches are same-repo and agent-authored.
+      #
+      # Fail closed. If the base cannot be fetched the instruction files stay
+      # absent rather than falling back to the PR's versions; the review's
+      # prompt and tool permissions come from this workflow regardless.
+      - name: Replace PR-controlled agent configuration with the base branch's
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          rm -rf .claude .mcp.json
+          rm -f CLAUDE.md AGENTS.md
+          if git fetch --depth 1 origin "$BASE_SHA" 2>/dev/null; then
+            git checkout "$BASE_SHA" -- CLAUDE.md 2>/dev/null || true
+            git checkout "$BASE_SHA" -- AGENTS.md 2>/dev/null || true
+          fi
       - uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
