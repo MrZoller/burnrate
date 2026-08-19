@@ -1,6 +1,7 @@
 """Poll-loop behavior: the 401 re-read, backoff, and failing loudly."""
 
 import asyncio
+import threading
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 
@@ -1103,29 +1104,58 @@ async def test_a_non_429_failure_clears_a_prior_retry_after(store, monkeypatch):
     assert poller.next_delay() == 120.0  # pure exponential for two failures
 
 
-async def test_the_reading_is_stamped_after_aggregation(
+async def test_a_slow_aggregation_does_not_hold_up_the_usage_fetch_or_its_timestamp(
     store, monkeypatch, live_response, tmp_path
 ):
-    """Codex #2: last_success_at is the fetch time captured AFTER aggregation, not the
-    poll-start time. Reusing poll-start `now` charged a multi-minute first scan to
-    freshness, so a just-fetched sample read stale. last_attempt_at keeps the start."""
-    import time
+    """A first transcript scan can take minutes, but must not delay the usage meter.
 
+    Events, rather than elapsed time, prove the fetch completes while aggregation is
+    deliberately held. The fixed clock also keeps the distinct attempt/aggregation
+    `now` and remote-reading `fetched_at` stamps explicit.
+    """
     from burnrate.store import AggregateStats
+
+    attempt_at = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
+    fetched_at = attempt_at + timedelta(seconds=1)
+
+    class Clock(datetime):
+        instants = iter((attempt_at, fetched_at))
+
+        @classmethod
+        def now(cls, tz=None):
+            return next(cls.instants)
 
     _credentials(monkeypatch, "tok")
     _fetches(monkeypatch, lambda token, n: live_response)
-    finished: dict[str, datetime] = {}
+    aggregation_started = threading.Event()
+    release_aggregation = threading.Event()
+    snapshot_stored = threading.Event()
 
     def slow_aggregate(root, *args, **kwargs):
-        time.sleep(0.05)  # stand in for a long first scan
-        finished["at"] = datetime.now(UTC)
+        aggregation_started.set()
+        assert release_aggregation.wait(timeout=1), "test must release the scan"
         return AggregateStats()
 
     monkeypatch.setattr(store, "aggregate_jsonl", slow_aggregate)
+    real_append = store.append_snapshot
+
+    def mark_snapshot_stored(*args, **kwargs):
+        result = real_append(*args, **kwargs)
+        snapshot_stored.set()
+        return result
+
+    monkeypatch.setattr(store, "append_snapshot", mark_snapshot_stored)
+    monkeypatch.setattr(poller_module, "datetime", Clock)
     poller = Poller(store, projects_dir=tmp_path)
+    poll = asyncio.create_task(poller.poll_once())
 
-    await poller.poll_once()
+    await asyncio.wait_for(asyncio.to_thread(aggregation_started.wait), timeout=1)
+    await asyncio.wait_for(asyncio.to_thread(snapshot_stored.wait), timeout=1)
 
-    assert poller.status.last_attempt_at < finished["at"], "the attempt is stamped before the scan"
-    assert poller.status.last_success_at >= finished["at"], "the sample is stamped after the scan"
+    assert not poll.done(), "gather still waits for the local aggregation pass"
+    assert poller.status.last_attempt_at == attempt_at
+    assert poller.status.last_success_at == fetched_at
+    assert poller._last_aggregate_at == attempt_at
+
+    release_aggregation.set()
+    assert await poll is not None

@@ -19,9 +19,10 @@ related-issue references; only explicit prerequisites would constrain selection.
   - acceptance: human must choose and state testable root-switch semantics for `Config`, attribution rollup persistence/querying, and `/api/attribution` in Q2
 - [!] T3 (standard) — attribution: cross-file duplicate assistant rows (session resume/fork/compaction) double-count token totals (follow-up to #16) (Fixes #24)
   - acceptance: human must choose and state testable response-deduplication semantics for `Turn`, incremental aggregation, persistence, and retention in Q3
-- [~] T4 (standard) — attribution: a non-UTF-8 filename freezes aggregation via the watermark/session-fallback binds (follow-up to #16) (Fixes #23)
+- [x] T4 (standard) — attribution: a non-UTF-8 filename freezes aggregation via the watermark/session-fallback binds (follow-up to #16) (Fixes #23)
   - acceptance: `aggregate_jsonl` commits a surrogate-bearing path and advances its watermark without `UnicodeEncodeError`; the session fallback is SQLite-bindable; a second unchanged pass reads no new rows or double-counts; tests cover both path-derived bind sites in `store.py`/`attribution.py`
-- [ ] T5 (standard) — poller: run attribution aggregation concurrently with the fetch so the first scan does not delay the usage meter (follow-up to #16) (Fixes #22)
+  - pr: 29
+- [~] T5 (standard) — poller: run attribution aggregation concurrently with the fetch so the first scan does not delay the usage meter (follow-up to #16) (Fixes #22)
   - acceptance: a slow first attribution scan does not delay the remote usage fetch in `poller.py`; aggregation still runs when fetching fails; tests preserve `now`/`fetched_at`, Retry-After, 429, and backoff behavior
 - [ ] T6 (standard) — attribution: surface aggregation freshness / health so a stalled aggregator does not serve stale rollups as current (follow-up to #16) (Fixes #21)
   - acceptance: the last successful aggregation time is exposed by `/api/attribution` and is not advanced by a failed aggregation; the static attribution panel labels when counts were generated and visibly reports a persistently failed/stale aggregator instead of presenting frozen rollups as current; poller/API tests cover success and failure, with the UI behavior manually verified
@@ -50,3 +51,4 @@ related-issue references; only explicit prerequisites would constrain selection.
 
 - [!] T10 (trivial) — parked review minors (batch)
   - acceptance: ship the accumulated non-blocking review minors as one focused, verified cleanup when the shepherd activates this rolling batch
+  - #30: replace the `backslashreplace` SQLite path identity with an injective filesystem-byte encoding; Codex finding from PR #29, verifier-classified minor
