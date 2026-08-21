@@ -56,7 +56,7 @@ related-issue references; only explicit prerequisites would constrain selection.
 
 ## Ad-hoc
 
-- [ ] T10 (major) — parked review minors (batch)
+- [~] T10 (major) — parked review minors (batch)
   - acceptance: per approved Q5 (2026-08-21), the combined cleanup uses an injective, versioned filesystem-byte identity without changing ordinary stored identities, proves transcript and projects-root collision isolation, rebuilds active attribution from source while preserving quarantined legacy rows, and durably checkpoints per-watermark response-identity backfill progress without losing atomicity
   - #30: replace the `backslashreplace` SQLite path identity with an injective filesystem-byte encoding; Codex finding from PR #29, verifier-classified minor
   - PR #35: make projects-root identity encoding injective for a surrogate-bearing path versus a literal `\udcXX` path; Codex finding, verifier-classified minor
