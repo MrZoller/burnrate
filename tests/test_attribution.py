@@ -17,7 +17,13 @@ from fastapi.testclient import TestClient
 
 from burnrate import attribution
 from burnrate.app import ATTRIBUTION_SCOPE, create_app
-from burnrate.attribution import ParseStats, parse_lines, read_new_lines, turn_from_record
+from burnrate.attribution import (
+    ParseStats,
+    parse_lines,
+    read_new_lines,
+    read_new_lines_with_health,
+    turn_from_record,
+)
 from burnrate.config import Config
 from burnrate.store import LARGE_CONTEXT_TOKENS, Store
 
@@ -989,6 +995,22 @@ def test_upgrade_backfill_does_not_skip_bytes_after_a_watermark(tmp_path):
     sessions = upgraded.attribution_sessions(root, 168, now=now)
     assert dict(totals["by_project"])["/home/dev/proj-burnrate"] == 230
     assert sessions[0]["total_tokens"] == 230
+
+
+def test_bounded_backfill_never_reads_past_a_long_unterminated_record(tmp_path):
+    """A later backfill chunk must not claim an appended response as pre-watermark."""
+    path = tmp_path / "transcript.jsonl"
+    committed = b"x" * 4096
+    appended = b'{"type":"assistant","message":"new"}\n'
+    path.write_bytes(committed + appended)
+
+    lines, new_offset, healthy = read_new_lines_with_health(
+        path, 0, max_bytes=1024, end_offset=len(committed)
+    )
+
+    assert healthy is True
+    assert lines == []
+    assert new_offset == 0
 
 
 def test_cross_file_duplicate_old_response_stays_deduplicated_for_live_session(tmp_path):

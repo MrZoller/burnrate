@@ -285,15 +285,25 @@ def read_new_lines_with_health(
         with path.open("rb") as handle:
             handle.seek(offset)
             chunks: list[bytes] = []
+            bytes_read = 0
             # Read in capped pieces, stopping as soon as a piece contains a newline.
             # In the common case the first piece has many lines and the loop ends after
             # one read; only a line longer than the cap forces further reads, and then
             # just enough to reach its terminating newline.
             while True:
-                piece = handle.read(max(1, max_bytes))
+                # ``size`` is capped at ``end_offset`` during an upgrade backfill.
+                # Recompute the remaining budget for every chunk: a long, unterminated
+                # record can require several reads, and reusing the initial budget
+                # would let a later chunk cross that committed boundary and mark an
+                # appended response as already folded.
+                remaining = size - offset - bytes_read
+                if remaining <= 0:
+                    break
+                piece = handle.read(min(max_bytes, remaining))
                 if not piece:
                     break
                 chunks.append(piece)
+                bytes_read += len(piece)
                 if b"\n" in piece:
                     break
             data = b"".join(chunks)
