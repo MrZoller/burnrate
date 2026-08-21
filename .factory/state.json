@@ -3,9 +3,9 @@
   "phase": "build",
   "spec_approved": true,
   "plan_approved": true,
-  "current_task": null,
-  "branch": null,
+  "current_task": "T10",
+  "branch": "factory/t10-parked-review-minors",
   "pr": null,
   "hold": false,
-  "updated": "2026-08-21T05:28:50Z"
+  "updated": "2026-08-21T05:30:00Z"
 }
