@@ -1,11 +1,11 @@
 {
   "project": "burnrate",
-  "phase": "build",
+  "phase": "idle",
   "spec_approved": true,
   "plan_approved": true,
-  "current_task": "T10",
-  "branch": "factory/t10-parked-review-minors",
-  "pr": 38,
-  "hold": true,
-  "updated": "2026-08-21T11:58:17Z"
+  "current_task": null,
+  "branch": null,
+  "pr": null,
+  "hold": false,
+  "updated": "2026-08-21T12:29:00Z"
 }
