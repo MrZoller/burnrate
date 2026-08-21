@@ -125,7 +125,7 @@ def create_app(config: Config | None = None) -> FastAPI:
         and not aggregated across devices. Read-only; carries token counts, never a
         credential.
         """
-        return JSONResponse(_attribution_payload(store, poller, window))
+        return JSONResponse(_attribution_payload(store, poller, config.attribution_dir, window))
 
     @app.get("/api/healthz")
     def healthz() -> JSONResponse:
@@ -222,7 +222,9 @@ _TOP_N = 8
 ATTRIBUTION_SCOPE = "This machine only — local token counts, not the usage meter."
 
 
-def _attribution_payload(store: Store, poller: Poller, window: str) -> dict[str, Any]:
+def _attribution_payload(
+    store: Store, poller: Poller, projects_root: Path | str, window: str
+) -> dict[str, Any]:
     """Assemble the attribution response for one window.
 
     Kept out of the handler so it is a plain, directly testable function. The
@@ -236,8 +238,8 @@ def _attribution_payload(store: Store, poller: Poller, window: str) -> dict[str,
     # One reading of the clock for both queries, so the by-project/model window and the
     # active-sessions window share an edge instead of drifting by the call latency.
     now = datetime.now(UTC)
-    totals = store.attribution_totals(hours, now=now)
-    sessions = store.attribution_sessions(hours, now=now)
+    totals = store.attribution_totals(projects_root, hours, now=now)
+    sessions = store.attribution_sessions(projects_root, hours, now=now)
 
     hourly_total = sum(tokens for _, tokens in totals["by_project"])
     by_agent = totals["by_agent"]

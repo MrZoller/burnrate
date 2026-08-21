@@ -23,6 +23,7 @@ from typing import Any
 
 from . import attribution
 from .attribution import ParseStats, Turn
+from .config import normalize_projects_root
 from .redact import scrub_json
 from .usage import UsageSnapshot
 
@@ -62,6 +63,7 @@ CREATE INDEX IF NOT EXISTS idx_raw_ts ON raw_snapshots (ts);
 -- own context was large, tracked here (not on the session) so the large-context share
 -- is genuinely bounded by the 24h/7d window rather than leaking a session's lifetime.
 CREATE TABLE IF NOT EXISTS hourly_usage (
+    projects_root         TEXT    NOT NULL,
     hour_start            TEXT    NOT NULL,
     project               TEXT    NOT NULL,
     model                 TEXT    NOT NULL,
@@ -71,32 +73,34 @@ CREATE TABLE IF NOT EXISTS hourly_usage (
     cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
     cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
     large_context_tokens  INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (hour_start, project, model, is_sidechain)
+    PRIMARY KEY (projects_root, hour_start, project, model, is_sidechain)
 );
-CREATE INDEX IF NOT EXISTS idx_hourly_hour ON hourly_usage (hour_start);
 
 -- One row per session, extended as later turns of the same session arrive. Feeds the
 -- "longest sessions active in the window" list, whose durations and lifetime token
 -- totals the hourly rollup cannot express (a session spans many hours). These totals
 -- are session LIFETIME, not windowed -- the panel labels them as such.
 CREATE TABLE IF NOT EXISTS sessions_rollup (
-    session_id       TEXT    PRIMARY KEY,
+    projects_root    TEXT    NOT NULL,
+    session_id       TEXT    NOT NULL,
     project          TEXT    NOT NULL,
     model            TEXT    NOT NULL,
     start_ts         TEXT    NOT NULL,
     end_ts           TEXT    NOT NULL,
     total_tokens     INTEGER NOT NULL DEFAULT 0,
-    max_turn_context INTEGER NOT NULL DEFAULT 0
+    max_turn_context INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (projects_root, session_id)
 );
-CREATE INDEX IF NOT EXISTS idx_sessions_end ON sessions_rollup (end_ts);
 
 -- How far each JSONL has been consumed, so an aggregation pass reads only the bytes
 -- appended since last time. `size`/`mtime` are diagnostics; `offset` is the contract.
 CREATE TABLE IF NOT EXISTS jsonl_watermarks (
-    path   TEXT PRIMARY KEY,
+    projects_root TEXT NOT NULL,
+    path   TEXT NOT NULL,
     offset INTEGER NOT NULL,
     size   INTEGER,
-    mtime  REAL
+    mtime  REAL,
+    PRIMARY KEY (projects_root, path)
 );
 """
 
@@ -115,6 +119,11 @@ LARGE_CONTEXT_TOKENS = 200_000
 # and the fold below drops turns older than this so the first pass over a months-deep
 # tree never balloons memory with hours nobody will query.
 ATTRIBUTION_RETENTION_DAYS = 30
+
+# Rows written before rollups were namespaced have no trustworthy root provenance.
+# Keep them rather than deleting user history, but never guess that the root active
+# during an upgrade owns them and silently mix them into its totals.
+LEGACY_PROJECTS_ROOT = "legacy-unscoped:v1"
 
 # Points per bucket returned by history(). At a 60s poll a 7-day window holds
 # 10,080 samples per bucket, and the browser refetches every minute; 90 days is
@@ -176,14 +185,76 @@ class Store:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(samples)")}
         if "known" not in columns:
             conn.execute("ALTER TABLE samples ADD COLUMN known INTEGER NOT NULL DEFAULT 1")
-        # large_context_tokens was added to hourly_usage after the first cut of the
-        # attribution rollup; add it to a database that already has the table without it.
         hourly_columns = {row["name"] for row in conn.execute("PRAGMA table_info(hourly_usage)")}
-        if hourly_columns and "large_context_tokens" not in hourly_columns:
-            conn.execute(
-                "ALTER TABLE hourly_usage"
-                " ADD COLUMN large_context_tokens INTEGER NOT NULL DEFAULT 0"
+        if hourly_columns and "projects_root" not in hourly_columns:
+            large_context = (
+                "large_context_tokens" if "large_context_tokens" in hourly_columns else "0"
             )
+            conn.execute(
+                "CREATE TABLE hourly_usage_namespaced ("
+                " projects_root TEXT NOT NULL, hour_start TEXT NOT NULL,"
+                " project TEXT NOT NULL, model TEXT NOT NULL, is_sidechain INTEGER NOT NULL,"
+                " input_tokens INTEGER NOT NULL DEFAULT 0,"
+                " output_tokens INTEGER NOT NULL DEFAULT 0,"
+                " cache_creation_tokens INTEGER NOT NULL DEFAULT 0,"
+                " cache_read_tokens INTEGER NOT NULL DEFAULT 0,"
+                " large_context_tokens INTEGER NOT NULL DEFAULT 0,"
+                " PRIMARY KEY (projects_root, hour_start, project, model, is_sidechain))"
+            )
+            conn.execute(
+                "INSERT INTO hourly_usage_namespaced SELECT ?, hour_start, project, model,"
+                " is_sidechain, input_tokens, output_tokens, cache_creation_tokens,"
+                f" cache_read_tokens, {large_context} FROM hourly_usage",
+                (LEGACY_PROJECTS_ROOT,),
+            )
+            conn.execute("DROP TABLE hourly_usage")
+            conn.execute("ALTER TABLE hourly_usage_namespaced RENAME TO hourly_usage")
+
+        session_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(sessions_rollup)")
+        }
+        if session_columns and "projects_root" not in session_columns:
+            conn.execute(
+                "CREATE TABLE sessions_rollup_namespaced ("
+                " projects_root TEXT NOT NULL, session_id TEXT NOT NULL,"
+                " project TEXT NOT NULL, model TEXT NOT NULL, start_ts TEXT NOT NULL,"
+                " end_ts TEXT NOT NULL, total_tokens INTEGER NOT NULL DEFAULT 0,"
+                " max_turn_context INTEGER NOT NULL DEFAULT 0,"
+                " PRIMARY KEY (projects_root, session_id))"
+            )
+            conn.execute(
+                "INSERT INTO sessions_rollup_namespaced SELECT ?, session_id, project, model,"
+                " start_ts, end_ts, total_tokens, max_turn_context FROM sessions_rollup",
+                (LEGACY_PROJECTS_ROOT,),
+            )
+            conn.execute("DROP TABLE sessions_rollup")
+            conn.execute("ALTER TABLE sessions_rollup_namespaced RENAME TO sessions_rollup")
+
+        watermark_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(jsonl_watermarks)")
+        }
+        if watermark_columns and "projects_root" not in watermark_columns:
+            conn.execute(
+                "CREATE TABLE jsonl_watermarks_namespaced ("
+                " projects_root TEXT NOT NULL, path TEXT NOT NULL, offset INTEGER NOT NULL,"
+                " size INTEGER, mtime REAL, PRIMARY KEY (projects_root, path))"
+            )
+            conn.execute(
+                "INSERT INTO jsonl_watermarks_namespaced SELECT ?, path, offset, size, mtime"
+                " FROM jsonl_watermarks",
+                (LEGACY_PROJECTS_ROOT,),
+            )
+            conn.execute("DROP TABLE jsonl_watermarks")
+            conn.execute("ALTER TABLE jsonl_watermarks_namespaced RENAME TO jsonl_watermarks")
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_hourly_root_hour"
+            " ON hourly_usage (projects_root, hour_start)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_root_end"
+            " ON sessions_rollup (projects_root, end_ts)"
+        )
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -386,7 +457,9 @@ class Store:
         sessions by ``end_ts`` anyway. Never re-reads a file that has not grown.
         """
         min_ts = datetime.now(UTC) - timedelta(days=retention_days)
-        watermarks = self._load_watermarks()
+        projects_root = _projects_root_identity(root)
+        root = normalize_projects_root(root)
+        watermarks = self._load_watermarks(projects_root)
 
         hourly: dict[tuple[str, str, str, int], list[int]] = {}
         sessions: dict[str, _SessionAcc] = {}
@@ -450,49 +523,58 @@ class Store:
             return stats
 
         with self._connect() as conn:
-            self._flush_hourly(conn, hourly)
-            self._flush_sessions(conn, sessions)
-            self._flush_watermarks(conn, offsets)
+            self._flush_hourly(conn, projects_root, hourly)
+            self._flush_sessions(conn, projects_root, sessions)
+            self._flush_watermarks(conn, projects_root, offsets)
         return stats
 
-    def _load_watermarks(self) -> dict[str, int]:
+    def _load_watermarks(self, projects_root: str) -> dict[str, int]:
         with self._connect() as conn:
-            rows = conn.execute("SELECT path, offset FROM jsonl_watermarks").fetchall()
+            rows = conn.execute(
+                "SELECT path, offset FROM jsonl_watermarks WHERE projects_root = ?",
+                (projects_root,),
+            ).fetchall()
         return {row["path"]: row["offset"] for row in rows}
 
     @staticmethod
     def _flush_hourly(
-        conn: sqlite3.Connection, hourly: dict[tuple[str, str, str, int], list[int]]
+        conn: sqlite3.Connection,
+        projects_root: str,
+        hourly: dict[tuple[str, str, str, int], list[int]],
     ) -> None:
         if not hourly:
             return
         conn.executemany(
             "INSERT INTO hourly_usage"
-            " (hour_start, project, model, is_sidechain,"
+            " (projects_root, hour_start, project, model, is_sidechain,"
             "  input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,"
             "  large_context_tokens)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-            " ON CONFLICT(hour_start, project, model, is_sidechain) DO UPDATE SET"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(projects_root, hour_start, project, model, is_sidechain)"
+            " DO UPDATE SET"
             "  input_tokens = input_tokens + excluded.input_tokens,"
             "  output_tokens = output_tokens + excluded.output_tokens,"
             "  cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,"
             "  cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,"
             "  large_context_tokens = large_context_tokens + excluded.large_context_tokens",
             [
-                (hour, project, model, sidechain, tok[0], tok[1], tok[2], tok[3], tok[4])
+                (projects_root, hour, project, model, sidechain, *tok)
                 for (hour, project, model, sidechain), tok in hourly.items()
             ],
         )
 
     @staticmethod
-    def _flush_sessions(conn: sqlite3.Connection, sessions: dict[str, _SessionAcc]) -> None:
+    def _flush_sessions(
+        conn: sqlite3.Connection, projects_root: str, sessions: dict[str, _SessionAcc]
+    ) -> None:
         if not sessions:
             return
         conn.executemany(
             "INSERT INTO sessions_rollup"
-            " (session_id, project, model, start_ts, end_ts, total_tokens, max_turn_context)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)"
-            " ON CONFLICT(session_id) DO UPDATE SET"
+            " (projects_root, session_id, project, model, start_ts, end_ts,"
+            "  total_tokens, max_turn_context)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(projects_root, session_id) DO UPDATE SET"
             # start/end widen to cover the turns seen across passes; the token total
             # accumulates, and max_turn_context keeps the deepest turn ever recorded.
             # model follows the latest turn by TIMESTAMP -- a session can switch models
@@ -508,6 +590,7 @@ class Store:
             "  max_turn_context = MAX(sessions_rollup.max_turn_context, excluded.max_turn_context)",
             [
                 (
+                    projects_root,
                     session_id,
                     acc.project,
                     acc.model,
@@ -522,16 +605,24 @@ class Store:
 
     @staticmethod
     def _flush_watermarks(
-        conn: sqlite3.Connection, offsets: dict[str, tuple[int, int | None, float | None]]
+        conn: sqlite3.Connection,
+        projects_root: str,
+        offsets: dict[str, tuple[int, int | None, float | None]],
     ) -> None:
         conn.executemany(
-            "INSERT INTO jsonl_watermarks (path, offset, size, mtime) VALUES (?, ?, ?, ?)"
-            " ON CONFLICT(path) DO UPDATE SET"
+            "INSERT INTO jsonl_watermarks (projects_root, path, offset, size, mtime)"
+            " VALUES (?, ?, ?, ?, ?)"
+            " ON CONFLICT(projects_root, path) DO UPDATE SET"
             "  offset = excluded.offset, size = excluded.size, mtime = excluded.mtime",
-            [(path, off, size, mtime) for path, (off, size, mtime) in offsets.items()],
+            [
+                (projects_root, path, off, size, mtime)
+                for path, (off, size, mtime) in offsets.items()
+            ],
         )
 
-    def attribution_totals(self, hours: float, now: datetime | None = None) -> dict[str, Any]:
+    def attribution_totals(
+        self, root: Path | str, hours: float, now: datetime | None = None
+    ) -> dict[str, Any]:
         """Windowed token totals, grouped for the by-project/model/agent panels.
 
         The cutoff is floored to the hour to match ``hour_start``'s granularity: an
@@ -553,7 +644,7 @@ class Store:
         # legitimately clock-skewed turn and lose it for good. Asymmetric -- no undercount
         # cost, unlike the lower-bound flooring.
         upper = _iso(now)
-        window = (cutoff, upper)
+        window = (_projects_root_identity(root), cutoff, upper)
         with self._connect() as conn:
             # One read transaction so all four SELECTs see a single WAL snapshot. Python's
             # sqlite3 opens no implicit transaction for SELECT, so without this a
@@ -569,24 +660,28 @@ class Store:
                 "  COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,"
                 "  COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,"
                 "  COALESCE(SUM(large_context_tokens), 0) AS large_context_tokens"
-                " FROM hourly_usage WHERE hour_start >= ? AND hour_start <= ?",
+                " FROM hourly_usage"
+                " WHERE projects_root = ? AND hour_start >= ? AND hour_start <= ?",
                 window,
             ).fetchone()
             by_project = conn.execute(
                 f"SELECT project AS name, SUM({_HOURLY_TOKENS}) AS tokens"
-                " FROM hourly_usage WHERE hour_start >= ? AND hour_start <= ?"
+                " FROM hourly_usage"
+                " WHERE projects_root = ? AND hour_start >= ? AND hour_start <= ?"
                 " GROUP BY project ORDER BY tokens DESC",
                 window,
             ).fetchall()
             by_model = conn.execute(
                 f"SELECT model AS name, SUM({_HOURLY_TOKENS}) AS tokens"
-                " FROM hourly_usage WHERE hour_start >= ? AND hour_start <= ?"
+                " FROM hourly_usage"
+                " WHERE projects_root = ? AND hour_start >= ? AND hour_start <= ?"
                 " GROUP BY model ORDER BY tokens DESC",
                 window,
             ).fetchall()
             by_agent = conn.execute(
                 f"SELECT is_sidechain, SUM({_HOURLY_TOKENS}) AS tokens"
-                " FROM hourly_usage WHERE hour_start >= ? AND hour_start <= ?"
+                " FROM hourly_usage"
+                " WHERE projects_root = ? AND hour_start >= ? AND hour_start <= ?"
                 " GROUP BY is_sidechain",
                 window,
             ).fetchall()
@@ -602,7 +697,7 @@ class Store:
         }
 
     def attribution_sessions(
-        self, hours: float, now: datetime | None = None
+        self, root: Path | str, hours: float, now: datetime | None = None
     ) -> list[dict[str, Any]]:
         """Every session active within the window, newest activity first.
 
@@ -626,8 +721,9 @@ class Store:
             rows = conn.execute(
                 "SELECT session_id, project, model, start_ts, end_ts, total_tokens,"
                 " max_turn_context FROM sessions_rollup"
-                " WHERE end_ts >= ? AND end_ts <= ? ORDER BY end_ts DESC",
-                (cutoff, upper),
+                " WHERE projects_root = ? AND end_ts >= ? AND end_ts <= ?"
+                " ORDER BY end_ts DESC",
+                (_projects_root_identity(root), cutoff, upper),
             ).fetchall()
         return [
             {
@@ -656,6 +752,11 @@ def _session_fallback(root: Path | str, path: Path) -> str:
     except ValueError:
         rel = path
     return _sqlite_text(f"unknown:{rel}")
+
+
+def _projects_root_identity(root: Path | str) -> str:
+    """The SQLite-safe identity shared by aggregation and API queries."""
+    return _sqlite_text(str(normalize_projects_root(root)))
 
 
 def _sqlite_text(value: str) -> str:

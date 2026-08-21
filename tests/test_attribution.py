@@ -7,6 +7,7 @@ sums, per-session spans, and the watermark that prevents double-counting), and t
 """
 
 import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -195,7 +196,7 @@ def test_an_out_of_range_token_count_does_not_freeze_aggregation(tmp_path):
     assert second.emitted == 0  # committed and watermarked, not re-read forever
     # The poison field became 0 (so the poison record contributes only its output 7);
     # the healthy record's real tokens are intact.
-    totals = store.attribution_totals(168, now=now)
+    totals = store.attribution_totals(root, 168, now=now)
     assert dict(totals["by_project"])["/work/a"] == 7 + (3 + 50)
 
 
@@ -226,7 +227,7 @@ def test_a_field_at_the_sqlite_max_still_commits(tmp_path):
 
     assert first.emitted == 1
     assert second.emitted == 0  # committed and watermark advanced, not re-read forever
-    totals = store.attribution_totals(168, now=now)
+    totals = store.attribution_totals(root, 168, now=now)
     assert dict(totals["by_project"])["/work/a"] == 50  # poison field 0, companion intact
 
 
@@ -267,7 +268,7 @@ def test_deeply_nested_json_is_malformed_not_a_freeze(tmp_path):
     assert first.emitted == 1  # only the healthy record; the poison line is malformed
     assert first.malformed == 1
     assert second.emitted == 0  # committed and watermark advanced, not re-read forever
-    totals = store.attribution_totals(168, now=now)
+    totals = store.attribution_totals(root, 168, now=now)
     assert dict(totals["by_project"])["/work/a"] == 3
 
 
@@ -311,7 +312,7 @@ def test_a_far_future_timestamp_is_dropped_without_freezing(tmp_path):
 
     assert first.emitted == 1  # only the healthy turn; the poison record is dropped
     assert second.emitted == 0  # committed and watermark advanced, not re-read forever
-    totals = store.attribution_totals(168, now=now)
+    totals = store.attribution_totals(root, 168, now=now)
     assert dict(totals["by_project"])["/work/a"] == 3
 
 
@@ -334,10 +335,10 @@ def test_future_dated_data_is_excluded_from_the_window(tmp_path):
     store = Store(tmp_path / "b.db")
     store.aggregate_jsonl(root)
 
-    total = sum(t for _, t in store.attribution_totals(24, now=now)["by_project"])
+    total = sum(t for _, t in store.attribution_totals(root, 24, now=now)["by_project"])
     assert total == 10  # the future hour bucket is excluded
 
-    ids = {s["session_id"] for s in store.attribution_sessions(24, now=now)}
+    ids = {s["session_id"] for s in store.attribution_sessions(root, 24, now=now)}
     assert ids == {"present"}  # the future-dated session is excluded
 
 
@@ -393,7 +394,7 @@ def test_a_lone_surrogate_does_not_freeze_aggregation(tmp_path):
     assert first.emitted == 2
     assert second.emitted == 0  # committed and watermark advanced, not re-read forever
     # The surrogate turn's tokens still count, under a repaired (encodable) project label.
-    totals = dict(store.attribution_totals(168, now=now)["by_project"])
+    totals = dict(store.attribution_totals(root, 168, now=now)["by_project"])
     assert totals["/work/a"] == 3
     assert sum(totals.values()) == 3 + 11
 
@@ -445,7 +446,7 @@ def test_a_surrogate_bearing_jsonl_path_commits_and_is_watermarked(tmp_path, mon
     assert first.emitted == 1
     assert second.emitted == 0
     assert reads == [0, 1, 1]  # the committed watermark starts the second pass at one
-    sessions = store.attribution_sessions(168, now=now)
+    sessions = store.attribution_sessions(root, 168, now=now)
     assert len(sessions) == 1
     assert sessions[0]["session_id"].startswith("unknown:")
     sessions[0]["session_id"].encode("utf-8")  # the path-derived fallback bound to SQLite
@@ -483,7 +484,7 @@ def test_distinct_surrogate_paths_keep_sqlite_identities(tmp_path, monkeypatch):
     assert store.aggregate_jsonl(root).emitted == 0
     with store._connect() as conn:
         watermark_count = conn.execute("SELECT COUNT(*) FROM jsonl_watermarks").fetchone()[0]
-    sessions = store.attribution_sessions(168, now=now)
+    sessions = store.attribution_sessions(root, 168, now=now)
 
     assert watermark_count == 2
     assert len(sessions) == 2
@@ -527,7 +528,7 @@ def test_post_read_stat_failure_keeps_aggregated_turns_watermarked(tmp_path, mon
 
     assert first_pass.scan_succeeded is False
     assert second_pass.emitted == 0
-    totals = dict(store.attribution_totals(168, now=now)["by_project"])
+    totals = dict(store.attribution_totals(root, 168, now=now)["by_project"])
     assert totals == {"/work/second": 20, "/work/first": 10}
 
 
@@ -571,7 +572,7 @@ def test_session_model_follows_the_latest_timestamp_turn_within_a_pass(tmp_path)
     store = Store(tmp_path / "b.db")
     store.aggregate_jsonl(root)
 
-    sessions = store.attribution_sessions(168, now=now)
+    sessions = store.attribution_sessions(root, 168, now=now)
     assert len(sessions) == 1
     assert sessions[0]["model"] == "claude-opus-4-8"  # the latest-ts turn's model
 
@@ -594,7 +595,7 @@ def test_session_model_follows_latest_timestamp_across_passes(tmp_path):
     (root / "proj-0" / "b.jsonl").write_text(older + "\n")
     store.aggregate_jsonl(root)  # pass 2: older sonnet turn, same session
 
-    sessions = store.attribution_sessions(168, now=now)
+    sessions = store.attribution_sessions(root, 168, now=now)
     assert len(sessions) == 1
     assert sessions[0]["model"] == "claude-opus-4-8"  # newer-ts model preserved
     assert sessions[0]["total_tokens"] == (10 + 50) * 2  # both turns still counted
@@ -758,7 +759,7 @@ def test_aggregate_rolls_up_by_project_model_and_sidechain(tmp_path):
     # Pin the query time past both turns: the sidechain turn is dated now+1min, whose
     # hour bucket rolls to the next hour when the test starts in the last minute of an
     # hour, and the hour_start <= now upper bound would then drop it (~1.6% of runs).
-    totals = store.attribution_totals(168, now=now + timedelta(minutes=1))
+    totals = store.attribution_totals(root, 168, now=now + timedelta(minutes=1))
     assert dict(totals["by_project"]) == {"/work/alpha": 165, "/work/beta": 150}
     assert dict(totals["by_model"]) == {"claude-opus-4-8": 300, "claude-sonnet-5": 15}
     assert totals["by_agent"] == {0: 300, 1: 15}  # main vs sidechain
@@ -780,7 +781,7 @@ def test_sessions_span_first_to_last_turn(tmp_path):
     store = Store(tmp_path / "b.db")
     store.aggregate_jsonl(root)
 
-    sessions = store.attribution_sessions(168)
+    sessions = store.attribution_sessions(root, 168)
 
     assert len(sessions) == 1
     span_hours = (sessions[0]["end_ts"] - sessions[0]["start_ts"]).total_seconds() / 3600
@@ -799,7 +800,7 @@ def test_watermark_prevents_double_counting(tmp_path):
 
     assert second.emitted == 0
     assert second.files_with_new_data == 0
-    totals = store.attribution_totals(168)
+    totals = store.attribution_totals(root, 168)
     assert dict(totals["by_project"])["/home/dev/proj-burnrate"] == 150  # counted once
 
 
@@ -817,7 +818,7 @@ def test_appended_turns_extend_an_existing_session(tmp_path):
     second = store.aggregate_jsonl(tmp_path / "projects")
 
     assert second.emitted == 1  # only the appended line
-    sessions = store.attribution_sessions(168)
+    sessions = store.attribution_sessions(tmp_path / "projects", 168)
     assert sessions[0]["total_tokens"] == 300  # both turns
     span = (sessions[0]["end_ts"] - sessions[0]["start_ts"]).total_seconds() / 3600
     assert span == pytest.approx(1.0, abs=0.01)
@@ -842,11 +843,125 @@ def test_retention_cutoff_bounds_hourly_but_not_sessions(tmp_path):
     store = Store(tmp_path / "b.db")
     store.aggregate_jsonl(root, retention_days=30)
 
-    sessions = {s["session_id"] for s in store.attribution_sessions(90 * 24, now=now)}
+    sessions = {s["session_id"] for s in store.attribution_sessions(root, 90 * 24, now=now)}
     assert sessions == {"old", "fresh"}  # the old session is kept whole, not dropped
     # ...but the old turn contributes nothing to the hourly rollup.
-    hourly_total = sum(t for _, t in store.attribution_totals(90 * 24, now=now)["by_project"])
+    hourly_total = sum(t for _, t in store.attribution_totals(root, 90 * 24, now=now)["by_project"])
     assert hourly_total == 15
+
+
+def test_switching_projects_roots_hides_history_then_restores_its_namespace(tmp_path, monkeypatch):
+    """A root switch is a view change, not a destructive rollup reset.
+
+    The first spelling intentionally contains ``nested/..``: it must select the
+    same persisted namespace as the canonical spelling used after switching back.
+    """
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr("burnrate.poller.Poller.start", _noop)
+    monkeypatch.setattr("burnrate.poller.Poller.stop", _noop)
+    now = datetime.now(UTC)
+    old_root = _tree(
+        tmp_path / "old-projects",
+        {"old.jsonl": [_assistant(cwd="/work/old", ts=now, input_tokens=11, output_tokens=0)]},
+    )
+    (old_root / "nested").mkdir()
+    new_root = _tree(
+        tmp_path / "new-projects",
+        {"new.jsonl": [_assistant(cwd="/work/new", ts=now, input_tokens=29, output_tokens=0)]},
+    )
+    db_path = tmp_path / "burnrate.db"
+
+    old_config = Config(db_path=db_path, attribution_dir=old_root / "nested" / "..")
+    old_app = create_app(old_config)
+    old_app.state.store.aggregate_jsonl(old_config.attribution_dir)
+    with TestClient(old_app) as old_client:
+        assert old_client.get("/api/attribution").json()["total_tokens"] == 11
+
+    new_config = Config(db_path=db_path, attribution_dir=new_root)
+    new_app = create_app(new_config)
+    with TestClient(new_app) as new_client:
+        # The new tree has not been folded yet; prior-root history must not leak in.
+        assert new_client.get("/api/attribution").json()["total_tokens"] == 0
+        new_app.state.store.aggregate_jsonl(new_config.attribution_dir)
+        new_body = new_client.get("/api/attribution").json()
+
+    assert new_body["total_tokens"] == 29
+    assert [row["label"] for row in new_body["by_project"]] == ["new"]
+
+    restored_app = create_app(Config(db_path=db_path, attribution_dir=old_root))
+    with TestClient(restored_app) as restored_client:
+        restored = restored_client.get("/api/attribution").json()
+
+    assert restored["total_tokens"] == 11
+    assert [row["label"] for row in restored["by_project"]] == ["old"]
+
+
+def test_migration_quarantines_existing_unscoped_rollups_without_clearing_them(
+    tmp_path, monkeypatch
+):
+    """An old database cannot prove which root made a row, so it is retained but hidden.
+
+    Assigning it to whichever root happens to be active at upgrade would silently
+    mix old data into that root. Dropping it would violate the no-clearing decision.
+    """
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr("burnrate.poller.Poller.start", _noop)
+    monkeypatch.setattr("burnrate.poller.Poller.stop", _noop)
+    now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    db_path = tmp_path / "legacy.db"
+    legacy = sqlite3.connect(db_path)
+    legacy.executescript(
+        """
+        CREATE TABLE hourly_usage (
+            hour_start TEXT NOT NULL, project TEXT NOT NULL, model TEXT NOT NULL,
+            is_sidechain INTEGER NOT NULL, input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+            large_context_tokens INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (hour_start, project, model, is_sidechain)
+        );
+        CREATE TABLE sessions_rollup (
+            session_id TEXT PRIMARY KEY, project TEXT NOT NULL, model TEXT NOT NULL,
+            start_ts TEXT NOT NULL, end_ts TEXT NOT NULL, total_tokens INTEGER NOT NULL DEFAULT 0,
+            max_turn_context INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE jsonl_watermarks (
+            path TEXT PRIMARY KEY, offset INTEGER NOT NULL, size INTEGER, mtime REAL
+        );
+        """
+    )
+    legacy.execute(
+        "INSERT INTO hourly_usage VALUES (?, '/work/legacy', 'claude-opus-4-8', 0, 17, 0, 0, 0, 0)",
+        (now.isoformat(),),
+    )
+    legacy.execute(
+        "INSERT INTO sessions_rollup VALUES ('legacy-session', '/work/legacy',"
+        " 'claude-opus-4-8', ?, ?, 17, 0)",
+        (now.isoformat(), now.isoformat()),
+    )
+    legacy.commit()
+    legacy.close()
+
+    root = tmp_path / "new-projects"
+    root.mkdir()
+    app = create_app(Config(db_path=db_path, attribution_dir=root))
+    with TestClient(app) as client:
+        body = client.get("/api/attribution").json()
+
+    assert body["total_tokens"] == 0
+    assert body["top_sessions"] == []
+    # Migration preserves the legacy records for an explicit legacy namespace; it
+    # must not solve the isolation bug by deleting a user's retained history.
+    with app.state.store._connect() as conn:
+        assert conn.execute("SELECT SUM(input_tokens) FROM hourly_usage").fetchone()[0] == 17
+        assert conn.execute("SELECT COUNT(*) FROM sessions_rollup").fetchone()[0] == 1
 
 
 # --------------------------------------------------------------- endpoint
@@ -1144,7 +1259,7 @@ def test_a_cache_priming_turn_counts_toward_large_context(tmp_path):
     store = Store(tmp_path / "b.db")
     store.aggregate_jsonl(root)
 
-    totals = store.attribution_totals(168, now=now)
+    totals = store.attribution_totals(root, 168, now=now)
     assert totals["large_context_tokens"] == 5 + 1 + LARGE_CONTEXT_TOKENS
 
 
@@ -1160,7 +1275,7 @@ def test_missing_session_id_does_not_merge_across_files(tmp_path):
     store = Store(tmp_path / "b.db")
     store.aggregate_jsonl(projects)
 
-    ids = sorted(s["session_id"] for s in store.attribution_sessions(168, now=now))
+    ids = sorted(s["session_id"] for s in store.attribution_sessions(projects, 168, now=now))
     assert len(ids) == 2
     assert ids[0] != ids[1]
     assert all(i.startswith("unknown:") for i in ids)
@@ -1186,14 +1301,14 @@ def test_session_lifetime_survives_the_retention_cutoff(tmp_path):
     store = Store(tmp_path / "b.db")
     store.aggregate_jsonl(root, retention_days=30)
 
-    sessions = store.attribution_sessions(90 * 24, now=now)
+    sessions = store.attribution_sessions(root, 90 * 24, now=now)
     assert len(sessions) == 1
     span_days = (sessions[0]["end_ts"] - sessions[0]["start_ts"]).total_seconds() / 86400
     assert span_days == pytest.approx(40, abs=0.1)
     assert sessions[0]["total_tokens"] == 1015  # lifetime: the 40-day-old turn included
     # Hourly stays bounded: the 40-day-old turn is past retention, so it is not folded
     # into any hourly window.
-    hourly_total = sum(t for _, t in store.attribution_totals(90 * 24, now=now)["by_project"])
+    hourly_total = sum(t for _, t in store.attribution_totals(root, 90 * 24, now=now)["by_project"])
     assert hourly_total == 15
 
 
@@ -1211,7 +1326,7 @@ def test_totals_cutoff_is_floored_to_the_hour(tmp_path):
     store = Store(tmp_path / "b.db")
     store.aggregate_jsonl(root)
 
-    total = sum(t for _, t in store.attribution_totals(24, now=now)["by_project"])
+    total = sum(t for _, t in store.attribution_totals(root, 24, now=now)["by_project"])
     assert total == 42
 
 
