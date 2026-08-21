@@ -56,9 +56,10 @@ related-issue references; only explicit prerequisites would constrain selection.
 
 ## Ad-hoc
 
-- [~] T10 (trivial) — parked review minors (batch)
-  - acceptance: ship the accumulated non-blocking review minors as one focused, verified cleanup when the shepherd activates this rolling batch
+- [!] T10 (major) — parked review minors (batch)
+  - acceptance: pending Q5; the proposed combined cleanup uses an injective, versioned filesystem-byte identity without changing ordinary stored identities, proves transcript and projects-root collision isolation, rebuilds active attribution from source while preserving quarantined legacy rows, and durably checkpoints per-watermark response-identity backfill progress without losing atomicity
   - #30: replace the `backslashreplace` SQLite path identity with an injective filesystem-byte encoding; Codex finding from PR #29, verifier-classified minor
   - PR #35: make projects-root identity encoding injective for a surrogate-bearing path versus a literal `\udcXX` path; Codex finding, verifier-classified minor
   - PR #36 panel: decide whether to rebuild attribution on upgrade so response identities already represented only in legacy aggregate rows can be indexed; verifier-classified minor
   - PR #36: retain per-watermark partial-backfill progress so healthy transcripts are not reparsed on every aggregation while an unresolved source remains; Codex finding, verifier-classified minor
+  - blocked pending Q5; parked branch: `factory/t10-parked-review-minors`
