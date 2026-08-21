@@ -764,6 +764,43 @@ def test_rebuild_keeps_healthy_checkpoint_across_restart_when_sibling_is_unhealt
     assert total == 130
 
 
+def test_prune_restarts_pending_staging_rebuild_before_promoting_sessions(tmp_path, monkeypatch):
+    """Pruning cannot leave a staged watermark without its old session rollup."""
+    now = datetime.now(UTC)
+    root = _tree(
+        tmp_path / "projects",
+        {
+            "healthy.jsonl": [
+                _assistant(ts=now - timedelta(days=31), session="shared", input_tokens=10)
+            ],
+            "broken.jsonl": [
+                _assistant(cwd="/work/broken", ts=now, session="shared", input_tokens=20)
+            ],
+        },
+    )
+    db_path = tmp_path / "b.db"
+    _make_pre_t10_database(db_path, root)
+    broken = root / "proj-1" / "broken.jsonl"
+    original_read = attribution.read_new_lines_with_health
+    broken_unhealthy = True
+
+    def read_with_broken_sibling(path: Path, offset: int, **kwargs):
+        if path == broken and broken_unhealthy:
+            return [], offset, False
+        return original_read(path, offset, **kwargs)
+
+    monkeypatch.setattr(attribution, "read_new_lines_with_health", read_with_broken_sibling)
+    upgraded = Store(db_path)
+    assert upgraded.aggregate_jsonl(root).scan_succeeded is False
+    upgraded.prune(attribution_days=30)
+
+    broken_unhealthy = False
+    assert upgraded.aggregate_jsonl(root).scan_succeeded is True
+    sessions = upgraded.attribution_sessions(root, 90 * 24, now=now)
+    assert sessions[0]["session_id"] == "shared"
+    assert sessions[0]["total_tokens"] == 130
+
+
 def test_rebuild_discards_staging_if_a_checkpointed_transcript_disappears(tmp_path, monkeypatch):
     """A completed retry cannot promote tokens from a transcript that has since vanished."""
     now = datetime.now(UTC)

@@ -164,6 +164,7 @@ LEGACY_PROJECTS_ROOT = "legacy-unscoped:v1"
 
 _FILESYSTEM_IDENTITY_PREFIX = b"\x00burnrate-filesystem:v1\x00"
 _DERIVED_IDENTITY_PREFIX = b"\x00burnrate-attribution:v1\x00"
+_STAGING_IDENTITY_PREFIX = _DERIVED_IDENTITY_PREFIX + b"staging\x00"
 _ATTRIBUTION_IDENTITY_VERSION = 1
 _FILESYSTEM_IDENTITY_REBUILD = "filesystem-identities-v1-rebuild"
 
@@ -544,6 +545,21 @@ class Store:
             conn.execute(
                 "DELETE FROM raw_snapshots WHERE ts < ?", (_iso(now - timedelta(days=raw_days)),)
             )
+            # A staging namespace has per-file watermarks but only aggregate rollups.
+            # Pruning an old staged session while retaining its watermark would skip the
+            # file on recovery and promote a permanently truncated lifetime total. Drop
+            # the complete namespace instead: the pending rebuild safely starts it over.
+            for table in (
+                "hourly_usage",
+                "sessions_rollup",
+                "jsonl_watermarks",
+                "response_identities",
+            ):
+                conn.execute(
+                    f"DELETE FROM {table} WHERE typeof(projects_root) = 'blob'"
+                    " AND substr(projects_root, 1, ?) = ?",
+                    (len(_STAGING_IDENTITY_PREFIX), _STAGING_IDENTITY_PREFIX),
+                )
             conn.execute("DELETE FROM hourly_usage WHERE hour_start < ?", (attribution_cutoff,))
             # By end_ts: a session that was still active inside the window is kept whole
             # even if it opened before the cutoff, so its span is not truncated.
