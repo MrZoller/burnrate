@@ -405,6 +405,45 @@ def test_a_lone_surrogate_does_not_freeze_aggregation(tmp_path):
     assert sum(totals.values()) == 3 + 11
 
 
+@pytest.mark.parametrize(
+    ("message_id", "request_id"),
+    [("msg-valid", "req-\ud800bad"), ("msg-\ud800bad", "req-valid")],
+)
+def test_a_surrogate_response_identity_does_not_freeze_aggregation(
+    tmp_path, message_id, request_id
+):
+    """An unbindable response ID disables dedup without rolling back its watermark.
+
+    A lone surrogate in either component cannot be stored in the persistent dedup
+    index. The otherwise valid turn must still count, and the committed watermark
+    must prevent an unchanged transcript from being counted again.
+    """
+    now = datetime.now(UTC)
+    root = _tree(
+        tmp_path / "projects",
+        {
+            "session.jsonl": [
+                _assistant(
+                    ts=now,
+                    input_tokens=11,
+                    output_tokens=7,
+                    message_id=message_id,
+                    request_id=request_id,
+                )
+            ]
+        },
+    )
+    store = Store(tmp_path / "b.db")
+
+    first = store.aggregate_jsonl(root)
+    second = store.aggregate_jsonl(root)
+
+    assert first.emitted == 1
+    assert second.emitted == 0
+    sessions = store.attribution_sessions(root, 168, now=now)
+    assert sessions[0]["total_tokens"] == 18  # unchanged pass did not double-count
+
+
 def test_a_surrogate_bearing_jsonl_path_commits_and_is_watermarked(tmp_path, monkeypatch):
     """A filename from an undecodable directory entry can contain a surrogate.
 
