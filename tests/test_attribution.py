@@ -891,6 +891,34 @@ def test_cross_file_duplicate_response_is_skipped_in_a_later_pass(tmp_path):
     assert sessions[0]["total_tokens"] == 150
 
 
+def test_upgrade_backfills_identities_before_a_later_fork_is_folded(tmp_path):
+    """An existing watermark must not leave pre-upgrade responses unprotected."""
+    now = datetime.now(UTC)
+    response = _assistant(
+        session="s1",
+        ts=now,
+        message_id="msg-before-upgrade",
+        request_id="req-before-upgrade",
+    )
+    root = _tree(tmp_path / "projects", {"original.jsonl": [response]})
+    db_path = tmp_path / "b.db"
+    Store(db_path).aggregate_jsonl(root)
+
+    # Model a database from immediately before response_identities was introduced:
+    # rollups and EOF watermarks survive, but the new table does not yet exist.
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DROP TABLE response_identities")
+
+    upgraded = Store(db_path)
+    _tree(root, {"fork.jsonl": [response]})
+    upgraded.aggregate_jsonl(root)
+
+    totals = upgraded.attribution_totals(root, 168, now=now)
+    sessions = upgraded.attribution_sessions(root, 168, now=now)
+    assert dict(totals["by_project"])["/home/dev/proj-burnrate"] == 150
+    assert sessions[0]["total_tokens"] == 150
+
+
 def test_cross_file_duplicate_old_response_stays_deduplicated_for_live_session(tmp_path):
     """A long-lived session retains an old response identity for a later fork copy."""
     now = datetime.now(UTC)

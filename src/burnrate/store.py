@@ -118,6 +118,16 @@ CREATE TABLE IF NOT EXISTS response_identities (
 );
 CREATE INDEX IF NOT EXISTS idx_response_identities_ts
     ON response_identities (response_ts);
+
+-- A pre-dedup database has watermarks but no response identities. Keep the
+-- migration marker after upgrading so each configured transcript root can seed
+-- its own index the first time it is scanned.
+CREATE TABLE IF NOT EXISTS attribution_migrations (
+    name TEXT PRIMARY KEY
+);
+CREATE TABLE IF NOT EXISTS response_identity_backfills (
+    projects_root TEXT PRIMARY KEY
+);
 """
 
 # Gross tokens for a hourly_usage row, the figure every panel ranks and shares on.
@@ -192,7 +202,22 @@ class Store:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
+            # ``executescript`` creates new tables before ``_migrate`` can inspect
+            # them. Remember this beforehand: an existing database without this
+            # table has already advanced its watermarks past responses whose
+            # identities must be recovered before a later fork can be deduplicated.
+            had_response_identities = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'response_identities'"
+            ).fetchone()
+            had_watermarks = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'jsonl_watermarks'"
+            ).fetchone()
             conn.executescript(SCHEMA)
+            if had_response_identities is None and had_watermarks is not None:
+                conn.execute(
+                    "INSERT OR IGNORE INTO attribution_migrations (name) VALUES (?)",
+                    ("response-identities-v1",),
+                )
             self._migrate(conn)
 
     @staticmethod
@@ -495,6 +520,7 @@ class Store:
         projects_root = _projects_root_identity(root)
         root = normalize_projects_root(root)
         watermarks = self._load_watermarks(projects_root)
+        self._backfill_response_identities(root, projects_root, watermarks)
         seen_responses = self._load_response_identities(projects_root, min_ts)
 
         hourly: dict[tuple[str, str, str, int], list[int]] = {}
@@ -600,6 +626,71 @@ class Store:
                 (projects_root, _iso(min_ts)),
             ).fetchall()
         return {(row["message_id"], row["request_id"]) for row in rows}
+
+    def _backfill_response_identities(
+        self, root: Path, projects_root: str, watermarks: dict[str, int]
+    ) -> None:
+        """Seed an upgraded database's index from bytes its watermarks already consumed.
+
+        The additive rollups cannot safely be replayed: that would count every old
+        response twice. Instead read only through each committed offset and record
+        identities, leaving all sums and watermarks untouched. A missing/truncated
+        transcript leaves the root pending so a later healthy scan can still recover
+        it; marking it complete would silently make a future fork double-count.
+        """
+        with self._connect() as conn:
+            needed = conn.execute(
+                "SELECT 1 FROM attribution_migrations WHERE name = ?",
+                ("response-identities-v1",),
+            ).fetchone()
+            complete = conn.execute(
+                "SELECT 1 FROM response_identity_backfills WHERE projects_root = ?",
+                (projects_root,),
+            ).fetchone()
+        if needed is None or complete is not None or not watermarks:
+            return
+
+        paths, scan_succeeded = attribution.scan_jsonl_files(root)
+        responses: dict[tuple[str, str], tuple[datetime, str]] = {}
+        found: set[str] = set()
+        for path in paths:
+            key = _sqlite_text(str(path))
+            end_offset = watermarks.get(key)
+            if end_offset is None:
+                continue
+            found.add(key)
+            try:
+                if path.stat().st_size < end_offset:
+                    scan_succeeded = False
+                    continue
+            except OSError:
+                scan_succeeded = False
+                continue
+            offset = 0
+            session_fallback = _session_fallback(root, path)
+            while offset < end_offset:
+                lines, next_offset, read_succeeded = attribution.read_new_lines_with_health(
+                    path, offset, end_offset=end_offset
+                )
+                if not read_succeeded or next_offset <= offset:
+                    scan_succeeded = False
+                    break
+                for turn in attribution.parse_lines(lines):
+                    if turn.response_identity is not None:
+                        session_id = turn.session_id
+                        if session_id == attribution.UNKNOWN:
+                            session_id = session_fallback
+                        responses.setdefault(turn.response_identity, (turn.ts, session_id))
+                offset = next_offset
+
+        if not scan_succeeded or found != set(watermarks):
+            return
+        with self._connect() as conn:
+            self._flush_response_identities(conn, projects_root, responses)
+            conn.execute(
+                "INSERT OR IGNORE INTO response_identity_backfills (projects_root) VALUES (?)",
+                (projects_root,),
+            )
 
     @staticmethod
     def _flush_hourly(

@@ -253,14 +253,23 @@ def read_new_lines(
 
 
 def read_new_lines_with_health(
-    path: Path | str, offset: int, max_bytes: int = MAX_READ_BYTES
+    path: Path | str,
+    offset: int,
+    max_bytes: int = MAX_READ_BYTES,
+    end_offset: int | None = None,
 ) -> tuple[list[str], int, bool]:
-    """Like :func:`read_new_lines`, additionally reporting filesystem read health."""
+    """Like :func:`read_new_lines`, additionally reporting filesystem read health.
+
+    ``end_offset`` lets a schema migration reread only bytes a committed watermark
+    already included, without accidentally claiming newly appended turns as seen.
+    """
     path = Path(path)
     try:
         size = path.stat().st_size
     except OSError:
         return [], offset, False
+    if end_offset is not None:
+        size = min(size, end_offset)
     if offset > size:
         # The file is SMALLER than where we last read, so restart from the beginning.
         # Claude Code transcripts are append-only -- they only ever grow -- so in
