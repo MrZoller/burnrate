@@ -54,7 +54,7 @@ def test_every_field_is_overridable(monkeypatch):
     assert config.host == "127.0.0.1"
     assert config.port == 9999
     assert config.poll_interval == 15.5
-    assert config.attribution_dir == Path("/tmp/projects")
+    assert config.attribution_dir == Path("/tmp/projects").resolve()
 
 
 def test_a_tilde_in_the_projects_dir_is_expanded(monkeypatch):
@@ -76,6 +76,15 @@ def test_a_relative_projects_dir_is_made_absolute(monkeypatch, raw):
     monkeypatch.setenv("BURNRATE_PROJECTS_DIR", raw)
 
     assert Config.from_env().attribution_dir.is_absolute()
+
+
+def test_projects_dir_is_normalized_for_its_persistent_attribution_identity(monkeypatch, tmp_path):
+    """Equivalent spellings must not create separate rollup namespaces after restart."""
+    root = tmp_path / "projects"
+    (root / "nested").mkdir(parents=True)
+    monkeypatch.setenv("BURNRATE_PROJECTS_DIR", str(root / "nested" / ".."))
+
+    assert Config.from_env().attribution_dir == root.resolve()
 
 
 def test_a_tilde_in_the_db_path_is_expanded(monkeypatch):
@@ -206,7 +215,7 @@ def test_print_effective_order_is_the_installers_contract(monkeypatch, capsys):
     print_effective()
 
     lines = capsys.readouterr().out.splitlines()
-    assert lines[1:] == ["127.0.0.1", "9999", "15.0", "/tmp/projects"]
+    assert lines[1:] == ["127.0.0.1", "9999", "15.0", str(Path("/tmp/projects").resolve())]
     assert Path(lines[0]).is_absolute(), "the db path comes first and is absolute"
 
 
@@ -246,7 +255,7 @@ def test_print_effective_is_runnable_as_a_module(monkeypatch):
         DEFAULT_HOST,
         str(DEFAULT_PORT),
         "60.0",
-        "/tmp/projects",
+        str(Path("/tmp/projects").resolve()),
     ]
 
 
@@ -276,7 +285,7 @@ def test_null_separated_output_survives_a_newline_in_the_path(monkeypatch, capsy
         "127.0.0.1",
         "9999",
         "15.0",
-        "/tmp/projects",
+        str(Path("/tmp/projects").resolve()),
     ]
 
 

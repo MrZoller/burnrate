@@ -42,6 +42,12 @@ class Config:
     poll_interval: float = 60.0
     attribution_dir: Path = DEFAULT_ATTRIBUTION_DIR
 
+    def __post_init__(self) -> None:
+        # This path is also the durable attribution namespace. Normalize manual
+        # construction as well as environment loading so equivalent spellings cannot
+        # split one transcript tree's history across multiple database identities.
+        object.__setattr__(self, "attribution_dir", normalize_projects_root(self.attribution_dir))
+
     @property
     def stale_after_seconds(self) -> float:
         """Age past which a reading is presented as stale rather than current.
@@ -118,6 +124,11 @@ def _path_env(name: str, default: Path) -> Path:
     """
     raw = Path(_str_env(name, str(default))).expanduser()
     return raw if raw.is_absolute() else Path.cwd() / raw
+
+
+def normalize_projects_root(path: Path | str) -> Path:
+    """Return the canonical identity used for one Claude projects tree."""
+    return Path(path).expanduser().resolve(strict=False)
 
 
 def print_effective(stream: TextIO | None = None, separator: str = "\n") -> None:
