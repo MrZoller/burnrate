@@ -262,7 +262,6 @@ These are enforced by tests and must survive any change:
 
 ## Dead code / not-currently-reachable paths
 
-- `AHEAD_OF_PACE` — see above.
 - The `else` branch in `app.py:138-141` ("static directory missing") is
   `pragma: no cover` — only reachable when the package is installed wrongly.
 - The `__main__` blocks in `config.py:188` and `plist.py:116` are
