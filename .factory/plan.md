@@ -53,6 +53,6 @@ related-issue references; only explicit prerequisites would constrain selection.
 
 ## Ad-hoc
 
-- [!] T10 (trivial) — parked review minors (batch)
+- [ ] T10 (trivial) — parked review minors (batch)
   - acceptance: ship the accumulated non-blocking review minors as one focused, verified cleanup when the shepherd activates this rolling batch
   - #30: replace the `backslashreplace` SQLite path identity with an injective filesystem-byte encoding; Codex finding from PR #29, verifier-classified minor
