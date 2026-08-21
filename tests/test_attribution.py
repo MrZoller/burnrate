@@ -917,6 +917,29 @@ def test_cross_file_duplicate_old_response_stays_deduplicated_for_live_session(t
     assert sessions[0]["total_tokens"] == 300
 
 
+def test_cross_file_duplicate_old_response_stays_deduplicated_until_prune(tmp_path):
+    """A session row keeps an old identity loadable between poll-driven prunes."""
+    now = datetime.now(UTC)
+    old_response = _assistant(
+        session="s1",
+        ts=now - timedelta(days=31),
+        message_id="msg-awaiting-prune",
+        request_id="req-awaiting-prune",
+    )
+    root = _tree(tmp_path / "projects", {"original.jsonl": [old_response]})
+    store = Store(tmp_path / "b.db")
+    store.aggregate_jsonl(root, retention_days=30)
+    _tree(root, {"fork.jsonl": [old_response]})
+
+    store.aggregate_jsonl(root, retention_days=30)
+
+    with store._connect() as conn:
+        total_tokens = conn.execute(
+            "SELECT total_tokens FROM sessions_rollup WHERE session_id = ?", ("s1",)
+        ).fetchone()[0]
+    assert total_tokens == 150
+
+
 def test_responses_sharing_only_one_identity_component_are_both_counted(tmp_path):
     """Retries can share one ID, so only the complete message/request pair deduplicates."""
     now = datetime.now(UTC)

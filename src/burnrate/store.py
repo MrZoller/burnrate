@@ -596,8 +596,8 @@ class Store:
                 "  AND sessions.session_id = identities.session_id"
                 " WHERE identities.projects_root = ?"
                 "   AND (identities.response_ts >= ?"
-                "     OR (identities.session_id IS NOT NULL AND sessions.end_ts >= ?))",
-                (projects_root, _iso(min_ts), _iso(min_ts)),
+                "     OR (identities.session_id IS NOT NULL AND sessions.session_id IS NOT NULL))",
+                (projects_root, _iso(min_ts)),
             ).fetchall()
         return {(row["message_id"], row["request_id"]) for row in rows}
 
