@@ -102,6 +102,19 @@ CREATE TABLE IF NOT EXISTS jsonl_watermarks (
     mtime  REAL,
     PRIMARY KEY (projects_root, path)
 );
+
+-- Stable API identities for assistant responses already included in the additive
+-- rollups. Claude Code can copy one response into multiple transcript files during
+-- resume/fork/compaction, where per-file watermarks alone cannot prevent duplicates.
+CREATE TABLE IF NOT EXISTS response_identities (
+    projects_root TEXT NOT NULL,
+    message_id    TEXT NOT NULL,
+    request_id    TEXT NOT NULL,
+    response_ts   TEXT NOT NULL,
+    PRIMARY KEY (projects_root, message_id, request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_response_identities_ts
+    ON response_identities (response_ts);
 """
 
 # Gross tokens for a hourly_usage row, the figure every panel ranks and shares on.
@@ -435,6 +448,9 @@ class Store:
             # By end_ts: a session that was still active inside the window is kept whole
             # even if it opened before the cutoff, so its span is not truncated.
             conn.execute("DELETE FROM sessions_rollup WHERE end_ts < ?", (attribution_cutoff,))
+            conn.execute(
+                "DELETE FROM response_identities WHERE response_ts < ?", (attribution_cutoff,)
+            )
 
     # ------------------------------------------------------------ attribution
 
@@ -460,10 +476,12 @@ class Store:
         projects_root = _projects_root_identity(root)
         root = normalize_projects_root(root)
         watermarks = self._load_watermarks(projects_root)
+        seen_responses = self._load_response_identities(projects_root, min_ts)
 
         hourly: dict[tuple[str, str, str, int], list[int]] = {}
         sessions: dict[str, _SessionAcc] = {}
         offsets: dict[str, tuple[int, int | None, float | None]] = {}
+        new_responses: dict[tuple[str, str], datetime] = {}
         stats = AggregateStats()
 
         # The scan is the iteration: making a second traversal would let a disappearing
@@ -496,6 +514,17 @@ class Store:
                     break
                 saw_new = True
                 for turn in attribution.parse_lines(lines, pass_stats):
+                    identity = turn.response_identity
+                    if identity is not None:
+                        if identity in seen_responses:
+                            continue
+                        # Claim it before folding so a copy in another file in this same
+                        # pass is skipped. Only recent identities are persisted: keeping
+                        # this index aligned with rollup retention bounds its size, while
+                        # the in-pass set still deduplicates an initial scan's old rows.
+                        seen_responses.add(identity)
+                        if turn.ts >= min_ts:
+                            new_responses[identity] = turn.ts
                     session_id = turn.session_id
                     if session_id == attribution.UNKNOWN:
                         session_id = session_fallback
@@ -525,6 +554,7 @@ class Store:
         with self._connect() as conn:
             self._flush_hourly(conn, projects_root, hourly)
             self._flush_sessions(conn, projects_root, sessions)
+            self._flush_response_identities(conn, projects_root, new_responses)
             self._flush_watermarks(conn, projects_root, offsets)
         return stats
 
@@ -535,6 +565,17 @@ class Store:
                 (projects_root,),
             ).fetchall()
         return {row["path"]: row["offset"] for row in rows}
+
+    def _load_response_identities(
+        self, projects_root: str, min_ts: datetime
+    ) -> set[tuple[str, str]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT message_id, request_id FROM response_identities"
+                " WHERE projects_root = ? AND response_ts >= ?",
+                (projects_root, _iso(min_ts)),
+            ).fetchall()
+        return {(row["message_id"], row["request_id"]) for row in rows}
 
     @staticmethod
     def _flush_hourly(
@@ -617,6 +658,23 @@ class Store:
             [
                 (projects_root, path, off, size, mtime)
                 for path, (off, size, mtime) in offsets.items()
+            ],
+        )
+
+    @staticmethod
+    def _flush_response_identities(
+        conn: sqlite3.Connection,
+        projects_root: str,
+        responses: dict[tuple[str, str], datetime],
+    ) -> None:
+        if not responses:
+            return
+        conn.executemany(
+            "INSERT OR IGNORE INTO response_identities"
+            " (projects_root, message_id, request_id, response_ts) VALUES (?, ?, ?, ?)",
+            [
+                (projects_root, message_id, request_id, _iso(ts))
+                for (message_id, request_id), ts in responses.items()
             ],
         )
 

@@ -76,6 +76,10 @@ class Turn:
     output_tokens: int
     cache_creation_tokens: int
     cache_read_tokens: int
+    # Claude Code preserves this pair when it copies an assistant response into a
+    # resumed, forked, or compacted transcript. Neither value alone is unique enough:
+    # retries can reuse a message id while receiving a new request id.
+    response_identity: tuple[str, str] | None = None
 
     @property
     def total_tokens(self) -> int:
@@ -184,6 +188,7 @@ def turn_from_record(record: dict) -> Turn | None:
         # Without a usable timestamp the turn cannot be placed in any window.
         return None
 
+    response_identity = _response_identity(message.get("id"), record.get("requestId"))
     return Turn(
         ts=ts,
         project=_str_or(record.get("cwd"), UNKNOWN),
@@ -194,6 +199,7 @@ def turn_from_record(record: dict) -> Turn | None:
         output_tokens=output_tokens,
         cache_creation_tokens=cache_creation,
         cache_read_tokens=cache_read,
+        response_identity=response_identity,
     )
 
 
@@ -342,6 +348,25 @@ def _utf8_safe(value: str) -> str:
     except UnicodeEncodeError:
         return value.encode("utf-8", "replace").decode("utf-8")
     return value
+
+
+def _response_identity(message_id: object, request_id: object) -> tuple[str, str] | None:
+    """Return Claude's stable response key when both components are SQLite-safe.
+
+    Missing or malformed metadata must not suppress a real turn. Unlike display
+    dimensions, lossy repair is unsafe here because two distinct IDs could collapse
+    onto the same key, so an unbindable component disables deduplication for the turn.
+    """
+    if not isinstance(message_id, str) or not message_id:
+        return None
+    if not isinstance(request_id, str) or not request_id:
+        return None
+    try:
+        message_id.encode("utf-8")
+        request_id.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    return message_id, request_id
 
 
 def _str_or(value: object, default: str) -> str:

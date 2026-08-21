@@ -39,6 +39,8 @@ def _assistant(
     output_tokens: int = 50,
     cache_creation: int = 0,
     cache_read: int = 0,
+    message_id: str | None = None,
+    request_id: str | None = None,
     **extra: object,
 ) -> str:
     ts = ts or datetime.now(UTC)
@@ -59,6 +61,10 @@ def _assistant(
         },
         **extra,
     }
+    if message_id is not None:
+        record["message"]["id"] = message_id
+    if request_id is not None:
+        record["requestId"] = request_id
     return json.dumps(record)
 
 
@@ -802,6 +808,146 @@ def test_watermark_prevents_double_counting(tmp_path):
     assert second.files_with_new_data == 0
     totals = store.attribution_totals(root, 168)
     assert dict(totals["by_project"])["/home/dev/proj-burnrate"] == 150  # counted once
+
+
+def test_cross_file_duplicate_response_is_counted_once_in_one_pass(tmp_path):
+    """A resume/fork copy must not inflate the initial scan's additive rollups."""
+    now = datetime.now(UTC)
+    response = _assistant(
+        session="s1",
+        ts=now,
+        message_id="msg-copied",
+        request_id="req-copied",
+    )
+    root = _tree(tmp_path / "projects", {"original.jsonl": [response], "fork.jsonl": [response]})
+    store = Store(tmp_path / "b.db")
+
+    store.aggregate_jsonl(root)
+
+    totals = store.attribution_totals(root, 168, now=now)
+    sessions = store.attribution_sessions(root, 168, now=now)
+    assert dict(totals["by_project"])["/home/dev/proj-burnrate"] == 150
+    assert sessions[0]["total_tokens"] == 150
+
+
+def test_cross_file_duplicate_response_is_skipped_in_a_later_pass(tmp_path):
+    """The seen-response identity must survive the watermark transaction and later scans."""
+    now = datetime.now(UTC)
+    response = _assistant(
+        session="s1",
+        ts=now,
+        message_id="msg-resumed",
+        request_id="req-resumed",
+    )
+    root = _tree(tmp_path / "projects", {"original.jsonl": [response]})
+    store = Store(tmp_path / "b.db")
+    store.aggregate_jsonl(root)
+    _tree(root, {"resumed.jsonl": [response]})
+
+    store.aggregate_jsonl(root)
+
+    totals = store.attribution_totals(root, 168, now=now)
+    sessions = store.attribution_sessions(root, 168, now=now)
+    assert dict(totals["by_project"])["/home/dev/proj-burnrate"] == 150
+    assert sessions[0]["total_tokens"] == 150
+
+
+def test_responses_sharing_only_one_identity_component_are_both_counted(tmp_path):
+    """Retries can share one ID, so only the complete message/request pair deduplicates."""
+    now = datetime.now(UTC)
+    root = _tree(
+        tmp_path / "projects",
+        {
+            "original.jsonl": [
+                _assistant(
+                    session="s1",
+                    ts=now,
+                    message_id="msg-first",
+                    request_id="req-first",
+                )
+            ],
+            "fork.jsonl": [
+                _assistant(
+                    session="s1",
+                    ts=now,
+                    message_id="msg-first",
+                    request_id="req-second",
+                ),
+                _assistant(
+                    session="s1",
+                    ts=now,
+                    message_id="msg-third",
+                    request_id="req-first",
+                ),
+            ],
+        },
+    )
+    store = Store(tmp_path / "b.db")
+
+    store.aggregate_jsonl(root)
+
+    totals = store.attribution_totals(root, 168, now=now)
+    sessions = store.attribution_sessions(root, 168, now=now)
+    assert dict(totals["by_project"])["/home/dev/proj-burnrate"] == 450
+    assert sessions[0]["total_tokens"] == 450
+
+
+def test_prune_removes_response_identities_past_attribution_retention(tmp_path):
+    """The persistent dedup index is bounded with the attribution retention window."""
+    now = datetime.now(UTC)
+    root = _tree(
+        tmp_path / "projects",
+        {"session.jsonl": [_assistant(ts=now, message_id="msg-fresh", request_id="req-fresh")]},
+    )
+    store = Store(tmp_path / "b.db")
+    store.aggregate_jsonl(root)
+
+    with store._connect() as conn:
+        conn.execute(
+            "INSERT INTO response_identities"
+            " (projects_root, message_id, request_id, response_ts) VALUES (?, ?, ?, ?)",
+            (
+                str(root.resolve()),
+                "msg-expired",
+                "req-expired",
+                (now - timedelta(days=31)).isoformat(),
+            ),
+        )
+
+    store.prune(attribution_days=30)
+
+    with store._connect() as conn:
+        identities = conn.execute(
+            "SELECT message_id, request_id FROM response_identities ORDER BY message_id"
+        ).fetchall()
+    assert [(row["message_id"], row["request_id"]) for row in identities] == [
+        ("msg-fresh", "req-fresh")
+    ]
+
+
+def test_response_identities_are_scoped_to_projects_root(tmp_path):
+    """A copied identity in a different configured transcript root is independent."""
+    now = datetime.now(UTC)
+    response = _assistant(ts=now, message_id="msg-shared", request_id="req-shared")
+    first_root = _tree(tmp_path / "first-projects", {"session.jsonl": [response]})
+    second_root = _tree(tmp_path / "second-projects", {"session.jsonl": [response]})
+    store = Store(tmp_path / "b.db")
+
+    store.aggregate_jsonl(first_root)
+    store.aggregate_jsonl(second_root)
+
+    assert (
+        dict(store.attribution_totals(first_root, 168, now=now)["by_project"])[
+            "/home/dev/proj-burnrate"
+        ]
+        == 150
+    )
+    assert (
+        dict(store.attribution_totals(second_root, 168, now=now)["by_project"])[
+            "/home/dev/proj-burnrate"
+        ]
+        == 150
+    )
 
 
 def test_appended_turns_extend_an_existing_session(tmp_path):
