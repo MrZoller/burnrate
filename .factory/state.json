@@ -5,7 +5,7 @@
   "plan_approved": true,
   "current_task": "T3",
   "branch": "factory/t3-deduplicate-responses",
-  "pr": null,
+  "pr": 36,
   "hold": false,
-  "updated": "2026-08-21T01:51:50Z"
+  "updated": "2026-08-21T02:19:15Z"
 }
