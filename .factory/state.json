@@ -3,9 +3,9 @@
   "phase": "build",
   "spec_approved": true,
   "plan_approved": true,
-  "current_task": "T2",
-  "branch": "factory/t2-namespace-attribution-roots",
-  "pr": 35,
+  "current_task": null,
+  "branch": null,
+  "pr": null,
   "hold": false,
-  "updated": "2026-08-21T01:43:39Z"
+  "updated": "2026-08-21T01:50:37Z"
 }
