@@ -5,7 +5,7 @@
   "plan_approved": true,
   "current_task": "T10",
   "branch": "factory/t10-parked-review-minors",
-  "pr": null,
-  "hold": false,
-  "updated": "2026-08-21T11:17:09Z"
+  "pr": 38,
+  "hold": true,
+  "updated": "2026-08-21T11:58:17Z"
 }
