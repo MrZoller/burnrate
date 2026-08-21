@@ -50,14 +50,12 @@ UNAVAILABLE = "unavailable"
 # gauge by one of these, so the colour agrees with the word instead of contradicting
 # it (a green "Healthy" beside a hero warning of an imminent cap was the bug).
 ON_PACE = "on_pace"
-AHEAD_OF_PACE = "ahead_of_pace"
 ON_PACE_TO_CAP = "on_pace_to_cap"
 TOO_EARLY = "too_early"
 UNKNOWN_PACE = "unknown"
 
 PACE_LABELS: dict[str, str] = {
     ON_PACE: "On pace",
-    AHEAD_OF_PACE: "Ahead of pace",
     ON_PACE_TO_CAP: "On pace to cap",
     TOO_EARLY: "Too early to tell",
     UNKNOWN_PACE: "Unknown",
@@ -292,9 +290,10 @@ class Pace:
 def _classify_pace(projection: Projection, bucket: Bucket, elapsed_fraction: float | None) -> str:
     """Turn a projection into a pace verdict, sharing item 2's elapsed/burn math.
 
-    The order is the one the issue spells out: below the elapsed line is "on pace"
-    regardless of where the projection lands, and only above it does the projection
-    split "ahead" (clears the reset) from "to cap" (crosses it first).
+    The diagonal is the verdict boundary: at or below elapsed time is "on pace";
+    above it is "on pace to cap". `project()` reaches the same conclusion through
+    a different floating-point calculation, so honour its clears-reset result in
+    the one-ULP boundary gap rather than rendering a contradictory red verdict.
     """
     status = projection.status
     # No usable window at all -- no reset reported, a reset already passed, or one out
@@ -320,7 +319,7 @@ def _classify_pace(projection: Projection, bucket: Bucket, elapsed_fraction: flo
     if bucket.utilization / 100.0 <= elapsed_fraction:
         return ON_PACE
     if status == CLEARS_RESET:
-        return AHEAD_OF_PACE
+        return ON_PACE
     # PROJECTED (crosses before the reset) or AT_CAP (already there).
     return ON_PACE_TO_CAP
 

@@ -211,13 +211,12 @@ These are enforced by tests and must survive any change:
   one direction — several tests pin behavior on the *specific* captured values
   (weekly util 14.0, `resets_at` starting `2026-08-15T16:00`,
   `test_usage.py:324`), so those keep reading `live_response` verbatim.
-- **The amber "Ahead of pace" tier is provably unreachable.** `projection.py`
-  keeps `AHEAD_OF_PACE` in `_classify_pace`, but under linear projection
-  burn% > elapsed% ⟺ the pace crosses 100% before the reset, so no input ever
-  produces it. Documented in `test_projection.py:441` as a faithful-but-dead
-  rendering of the issue's tree; a *real* amber threshold is a planned follow-up.
-  Colors are keyed on the status token, so wiring a real threshold later is a
-  projection change + `app.js` `PACE` map.
+- **Pace verdicts have one judged boundary.** Under linear projection,
+  burn% > elapsed% ⟺ the pace crosses 100% before the reset. `projection.py`
+  therefore exposes only green `on_pace` at/below the diagonal and red
+  `on_pace_to_cap` above it; too-early and unknown readings remain neutral. A
+  future warning tier would need a real product threshold in the projection and
+  a matching `app.js` `PACE` entry rather than a mathematically dead status.
 - **`/api/now` has no exception handler.** `project()` and the bucket assembly
   run inside a plain `def now()` handler; an uncaught exception there is a 500
   for the whole dashboard until a later poll replaces the reading. The code's
@@ -263,7 +262,6 @@ These are enforced by tests and must survive any change:
 
 ## Dead code / not-currently-reachable paths
 
-- `AHEAD_OF_PACE` — see above.
 - The `else` branch in `app.py:138-141` ("static directory missing") is
   `pragma: no cover` — only reachable when the package is installed wrongly.
 - The `__main__` blocks in `config.py:188` and `plist.py:116` are

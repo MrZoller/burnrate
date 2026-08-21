@@ -18,7 +18,7 @@ related-issue references; only explicit prerequisites would constrain selection.
 - [x] T2 (standard) — attribution: changing BURNRATE_PROJECTS_DIR leaves the old root's rollups mixed in for 30 days (follow-up to #16) (Fixes #25)
   - acceptance: namespace attribution rollups by normalized projects root; `Config`, persistence, incremental aggregation, and `/api/attribution` query only the active root while retaining prior-root history in its own namespace; migration and root-switch tests prove totals never mix and no prior-root data is cleared
   - pr: 35
-- [R] T3 (standard) — attribution: cross-file duplicate assistant rows (session resume/fork/compaction) double-count token totals (follow-up to #16) (Fixes #24)
+- [x] T3 (standard) — attribution: cross-file duplicate assistant rows (session resume/fork/compaction) double-count token totals (follow-up to #16) (Fixes #24)
   - acceptance: identify duplicate assistant responses across transcript files, persist their identities with bounded retention, and make incremental aggregation skip already-counted responses across resumed/forked/compacted files; tests cover in-pass and later-pass duplicates without suppressing distinct responses
   - pr: 36
 - [x] T4 (standard) — attribution: a non-UTF-8 filename freezes aggregation via the watermark/session-fallback binds (follow-up to #16) (Fixes #23)
@@ -30,7 +30,7 @@ related-issue references; only explicit prerequisites would constrain selection.
 - [x] T6 (standard) — attribution: surface aggregation freshness / health so a stalled aggregator does not serve stale rollups as current (follow-up to #16) (Fixes #21)
   - acceptance: the last successful aggregation time is exposed by `/api/attribution` and is not advanced by a failed aggregation; the static attribution panel labels when counts were generated and visibly reports a persistently failed/stale aggregator instead of presenting frozen rollups as current; poller/API tests cover success and failure, with the UI behavior manually verified
   - pr: 32
-- [ ] T7 (standard) — dashboard: "Ahead of pace" (amber) pace tier is unreachable under linear projection (follow-up to #15) (Fixes #18)
+- [~] T7 (standard) — dashboard: "Ahead of pace" (amber) pace tier is unreachable under linear projection (follow-up to #15) (Fixes #18)
   - acceptance: remove the amber/ahead tier from projection, API, and dashboard vocabulary while preserving green, red, and neutral behavior; tests prove no projection result or rendered status uses the removed tier
 - [x] T8 (trivial) — dashboard: details-table status word is not staleness-aware (follow-up to #5) (Fixes #13)
   - acceptance: `renderTable` receives snapshot staleness on success and outage paths; stale rows retain numeric details but show no live Healthy/Watch/Critical judgment or live color carrier; regression coverage verifies the static-page wiring
@@ -60,3 +60,4 @@ related-issue references; only explicit prerequisites would constrain selection.
   - #30: replace the `backslashreplace` SQLite path identity with an injective filesystem-byte encoding; Codex finding from PR #29, verifier-classified minor
   - PR #35: make projects-root identity encoding injective for a surrogate-bearing path versus a literal `\udcXX` path; Codex finding, verifier-classified minor
   - PR #36 panel: decide whether to rebuild attribution on upgrade so response identities already represented only in legacy aggregate rows can be indexed; verifier-classified minor
+  - PR #36: retain per-watermark partial-backfill progress so healthy transcripts are not reparsed on every aggregation while an unresolved source remains; Codex finding, verifier-classified minor

@@ -81,7 +81,6 @@ const pct = (value) => `${Math.round(value)}%`;
  * "too early" and "unknown" are explicitly not judgements. */
 const PACE = {
   on_pace: { color: "var(--good)" },
-  ahead_of_pace: { color: "var(--warning)" },
   on_pace_to_cap: { color: "var(--critical)" },
   too_early: { color: "var(--ink-muted)" },
   unknown: { color: "var(--ink-muted)" },

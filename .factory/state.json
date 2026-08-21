@@ -3,9 +3,9 @@
   "phase": "build",
   "spec_approved": true,
   "plan_approved": true,
-  "current_task": "T3",
-  "branch": "factory/t3-deduplicate-responses",
-  "pr": 36,
+  "current_task": "T7",
+  "branch": "factory/t7-remove-amber-tier",
+  "pr": null,
   "hold": false,
-  "updated": "2026-08-21T02:21:26Z"
+  "updated": "2026-08-21T04:08:12Z"
 }

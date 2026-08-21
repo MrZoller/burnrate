@@ -405,12 +405,23 @@ def test_an_unrecognized_bucket_reports_no_window_and_no_verdict(client):
 
 def test_every_known_bucket_carries_a_pace_verdict(client):
     body = client.get("/api/now").json()
-    verdicts = {"on_pace", "ahead_of_pace", "on_pace_to_cap", "too_early", "unknown"}
+    verdicts = {"on_pace", "on_pace_to_cap", "too_early", "unknown"}
+    labels = {"On pace", "On pace to cap", "Too early to tell", "Unknown"}
 
     for bucket in body["buckets"]:
         assert bucket["pace_status"] in verdicts
+        assert bucket["pace_label"] in labels
         if bucket["known"] and bucket["window_opened_at"]:
             assert 0.0 <= bucket["elapsed_fraction"] <= 1.0
+
+
+def test_static_dashboard_has_no_removed_pace_vocabulary(client):
+    """The served dashboard cannot render the retired amber status from an API response."""
+    dashboard = "\n".join((client.get("/").text, client.get("/app.js").text)).lower()
+
+    assert "ahead_of_pace" not in dashboard
+    assert "ahead of pace" not in dashboard
+    assert "amber" not in dashboard
 
 
 def test_an_hourly_poll_does_not_call_its_own_fresh_reading_stale(make_client):
