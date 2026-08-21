@@ -15,10 +15,12 @@ related-issue references; only explicit prerequisites would constrain selection.
 
 - [!] T1 (standard) — Enable Claude reviews once the fixed workflow template lands (Fixes #28)
   - acceptance: copy the landed fixed workflow template wholesale into `.github/workflows/`; review same-repo PR content from a trusted `pull_request_target` definition while stripping workspace instructions and executable Claude configuration; restore trusted base instruction files at their original depths; publish an always-run `claude-code-review` status against the PR head SHA; verify the subscription token cannot be disclosed and the shepherd can detect the head-keyed verdict; blocked pending Q1
-- [~] T2 (standard) — attribution: changing BURNRATE_PROJECTS_DIR leaves the old root's rollups mixed in for 30 days (follow-up to #16) (Fixes #25)
+- [x] T2 (standard) — attribution: changing BURNRATE_PROJECTS_DIR leaves the old root's rollups mixed in for 30 days (follow-up to #16) (Fixes #25)
   - acceptance: namespace attribution rollups by normalized projects root; `Config`, persistence, incremental aggregation, and `/api/attribution` query only the active root while retaining prior-root history in its own namespace; migration and root-switch tests prove totals never mix and no prior-root data is cleared
-- [ ] T3 (standard) — attribution: cross-file duplicate assistant rows (session resume/fork/compaction) double-count token totals (follow-up to #16) (Fixes #24)
+  - pr: 35
+- [R] T3 (standard) — attribution: cross-file duplicate assistant rows (session resume/fork/compaction) double-count token totals (follow-up to #16) (Fixes #24)
   - acceptance: identify duplicate assistant responses across transcript files, persist their identities with bounded retention, and make incremental aggregation skip already-counted responses across resumed/forked/compacted files; tests cover in-pass and later-pass duplicates without suppressing distinct responses
+  - pr: 36
 - [x] T4 (standard) — attribution: a non-UTF-8 filename freezes aggregation via the watermark/session-fallback binds (follow-up to #16) (Fixes #23)
   - acceptance: `aggregate_jsonl` commits a surrogate-bearing path and advances its watermark without `UnicodeEncodeError`; the session fallback is SQLite-bindable; a second unchanged pass reads no new rows or double-counts; tests cover both path-derived bind sites in `store.py`/`attribution.py`
   - pr: 29
@@ -56,3 +58,5 @@ related-issue references; only explicit prerequisites would constrain selection.
 - [ ] T10 (trivial) — parked review minors (batch)
   - acceptance: ship the accumulated non-blocking review minors as one focused, verified cleanup when the shepherd activates this rolling batch
   - #30: replace the `backslashreplace` SQLite path identity with an injective filesystem-byte encoding; Codex finding from PR #29, verifier-classified minor
+  - PR #35: make projects-root identity encoding injective for a surrogate-bearing path versus a literal `\udcXX` path; Codex finding, verifier-classified minor
+  - PR #36 panel: decide whether to rebuild attribution on upgrade so response identities already represented only in legacy aggregate rows can be indexed; verifier-classified minor

@@ -76,6 +76,10 @@ class Turn:
     output_tokens: int
     cache_creation_tokens: int
     cache_read_tokens: int
+    # Claude Code preserves this pair when it copies an assistant response into a
+    # resumed, forked, or compacted transcript. Neither value alone is unique enough:
+    # retries can reuse a message id while receiving a new request id.
+    response_identity: tuple[str, str] | None = None
 
     @property
     def total_tokens(self) -> int:
@@ -184,6 +188,7 @@ def turn_from_record(record: dict) -> Turn | None:
         # Without a usable timestamp the turn cannot be placed in any window.
         return None
 
+    response_identity = _response_identity(message.get("id"), record.get("requestId"))
     return Turn(
         ts=ts,
         project=_str_or(record.get("cwd"), UNKNOWN),
@@ -194,6 +199,7 @@ def turn_from_record(record: dict) -> Turn | None:
         output_tokens=output_tokens,
         cache_creation_tokens=cache_creation,
         cache_read_tokens=cache_read,
+        response_identity=response_identity,
     )
 
 
@@ -247,14 +253,23 @@ def read_new_lines(
 
 
 def read_new_lines_with_health(
-    path: Path | str, offset: int, max_bytes: int = MAX_READ_BYTES
+    path: Path | str,
+    offset: int,
+    max_bytes: int = MAX_READ_BYTES,
+    end_offset: int | None = None,
 ) -> tuple[list[str], int, bool]:
-    """Like :func:`read_new_lines`, additionally reporting filesystem read health."""
+    """Like :func:`read_new_lines`, additionally reporting filesystem read health.
+
+    ``end_offset`` lets a schema migration reread only bytes a committed watermark
+    already included, without accidentally claiming newly appended turns as seen.
+    """
     path = Path(path)
     try:
         size = path.stat().st_size
     except OSError:
         return [], offset, False
+    if end_offset is not None:
+        size = min(size, end_offset)
     if offset > size:
         # The file is SMALLER than where we last read, so restart from the beginning.
         # Claude Code transcripts are append-only -- they only ever grow -- so in
@@ -265,19 +280,30 @@ def read_new_lines_with_health(
         offset = 0
     if offset >= size:
         return [], offset, True
+    max_bytes = min(max_bytes, size - offset)
     try:
         with path.open("rb") as handle:
             handle.seek(offset)
             chunks: list[bytes] = []
+            bytes_read = 0
             # Read in capped pieces, stopping as soon as a piece contains a newline.
             # In the common case the first piece has many lines and the loop ends after
             # one read; only a line longer than the cap forces further reads, and then
             # just enough to reach its terminating newline.
             while True:
-                piece = handle.read(max(1, max_bytes))
+                # ``size`` is capped at ``end_offset`` during an upgrade backfill.
+                # Recompute the remaining budget for every chunk: a long, unterminated
+                # record can require several reads, and reusing the initial budget
+                # would let a later chunk cross that committed boundary and mark an
+                # appended response as already folded.
+                remaining = size - offset - bytes_read
+                if remaining <= 0:
+                    break
+                piece = handle.read(min(max_bytes, remaining))
                 if not piece:
                     break
                 chunks.append(piece)
+                bytes_read += len(piece)
                 if b"\n" in piece:
                     break
             data = b"".join(chunks)
@@ -342,6 +368,25 @@ def _utf8_safe(value: str) -> str:
     except UnicodeEncodeError:
         return value.encode("utf-8", "replace").decode("utf-8")
     return value
+
+
+def _response_identity(message_id: object, request_id: object) -> tuple[str, str] | None:
+    """Return Claude's stable response key when both components are SQLite-safe.
+
+    Missing or malformed metadata must not suppress a real turn. Unlike display
+    dimensions, lossy repair is unsafe here because two distinct IDs could collapse
+    onto the same key, so an unbindable component disables deduplication for the turn.
+    """
+    if not isinstance(message_id, str) or not message_id:
+        return None
+    if not isinstance(request_id, str) or not request_id:
+        return None
+    try:
+        message_id.encode("utf-8")
+        request_id.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    return message_id, request_id
 
 
 def _str_or(value: object, default: str) -> str:

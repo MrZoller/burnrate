@@ -28,6 +28,7 @@ from .redact import scrub_json
 from .usage import UsageSnapshot
 
 SCHEMA = """
+BEGIN IMMEDIATE;
 CREATE TABLE IF NOT EXISTS samples (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     ts          TEXT    NOT NULL,
@@ -101,6 +102,32 @@ CREATE TABLE IF NOT EXISTS jsonl_watermarks (
     size   INTEGER,
     mtime  REAL,
     PRIMARY KEY (projects_root, path)
+);
+
+-- Stable API identities for assistant responses already included in the additive
+-- rollups. Claude Code can copy one response into multiple transcript files during
+-- resume/fork/compaction, where per-file watermarks alone cannot prevent duplicates.
+CREATE TABLE IF NOT EXISTS response_identities (
+    projects_root TEXT NOT NULL,
+    message_id    TEXT NOT NULL,
+    request_id    TEXT NOT NULL,
+    response_ts   TEXT NOT NULL,
+    -- An old response remains deduplicable while its still-active session is
+    -- visible. Its own timestamp can predate the hourly retention window.
+    session_id    TEXT,
+    PRIMARY KEY (projects_root, message_id, request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_response_identities_ts
+    ON response_identities (response_ts);
+
+-- A pre-dedup database has watermarks but no response identities. Keep the
+-- migration marker after upgrading so each configured transcript root can seed
+-- its own index the first time it is scanned.
+CREATE TABLE IF NOT EXISTS attribution_migrations (
+    name TEXT PRIMARY KEY
+);
+CREATE TABLE IF NOT EXISTS response_identity_backfills (
+    projects_root TEXT PRIMARY KEY
 );
 """
 
@@ -176,7 +203,25 @@ class Store:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
+            # ``executescript`` creates new tables before ``_migrate`` can inspect
+            # them. Remember this beforehand: an existing database without this
+            # table has already advanced its watermarks past responses whose
+            # identities must be recovered before a later fork can be deduplicated.
+            # SCHEMA starts a transaction, so its new tables and this marker commit
+            # together. A shutdown cannot leave a table that suppresses the backfill
+            # without the marker that requests it.
+            had_response_identities = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'response_identities'"
+            ).fetchone()
+            had_watermarks = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'jsonl_watermarks'"
+            ).fetchone()
             conn.executescript(SCHEMA)
+            if had_response_identities is None and had_watermarks is not None:
+                conn.execute(
+                    "INSERT OR IGNORE INTO attribution_migrations (name) VALUES (?)",
+                    ("response-identities-v1",),
+                )
             self._migrate(conn)
 
     @staticmethod
@@ -185,6 +230,11 @@ class Store:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(samples)")}
         if "known" not in columns:
             conn.execute("ALTER TABLE samples ADD COLUMN known INTEGER NOT NULL DEFAULT 1")
+        response_identity_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(response_identities)")
+        }
+        if response_identity_columns and "session_id" not in response_identity_columns:
+            conn.execute("ALTER TABLE response_identities ADD COLUMN session_id TEXT")
         hourly_columns = {row["name"] for row in conn.execute("PRAGMA table_info(hourly_usage)")}
         if hourly_columns and "projects_root" not in hourly_columns:
             large_context = (
@@ -435,6 +485,20 @@ class Store:
             # By end_ts: a session that was still active inside the window is kept whole
             # even if it opened before the cutoff, so its span is not truncated.
             conn.execute("DELETE FROM sessions_rollup WHERE end_ts < ?", (attribution_cutoff,))
+            # Identities follow the session lifetime, not the hourly window: an old
+            # turn remains part of a live session's lifetime total and a later
+            # resume/fork copy must not add it again. Pre-session-id rows are from
+            # the original index schema, so retain their old bounded behavior.
+            conn.execute(
+                "DELETE FROM response_identities AS identities"
+                " WHERE (session_id IS NULL AND response_ts < ?)"
+                " OR (session_id IS NOT NULL AND NOT EXISTS ("
+                "   SELECT 1 FROM sessions_rollup AS sessions"
+                "   WHERE sessions.projects_root = identities.projects_root"
+                "     AND sessions.session_id = identities.session_id"
+                "     AND sessions.end_ts >= ?))",
+                (attribution_cutoff, attribution_cutoff),
+            )
 
     # ------------------------------------------------------------ attribution
 
@@ -460,10 +524,13 @@ class Store:
         projects_root = _projects_root_identity(root)
         root = normalize_projects_root(root)
         watermarks = self._load_watermarks(projects_root)
+        self._backfill_response_identities(root, projects_root, watermarks)
+        seen_responses = self._load_response_identities(projects_root, min_ts)
 
         hourly: dict[tuple[str, str, str, int], list[int]] = {}
         sessions: dict[str, _SessionAcc] = {}
         offsets: dict[str, tuple[int, int | None, float | None]] = {}
+        new_responses: dict[tuple[str, str], tuple[datetime, str]] = {}
         stats = AggregateStats()
 
         # The scan is the iteration: making a second traversal would let a disappearing
@@ -499,6 +566,16 @@ class Store:
                     session_id = turn.session_id
                     if session_id == attribution.UNKNOWN:
                         session_id = session_fallback
+                    identity = turn.response_identity
+                    if identity is not None:
+                        if identity in seen_responses:
+                            continue
+                        # Claim it before folding so a copy in another file in this same
+                        # pass is skipped. Identities track the session's retention: old
+                        # turns are still part of a live session's lifetime total, so a
+                        # later copied transcript must remain recognizable.
+                        seen_responses.add(identity)
+                        new_responses[identity] = (turn.ts, session_id)
                     _fold_turn(hourly, sessions, turn, session_id, fold_hourly=turn.ts >= min_ts)
                 offset = new_offset
 
@@ -525,6 +602,7 @@ class Store:
         with self._connect() as conn:
             self._flush_hourly(conn, projects_root, hourly)
             self._flush_sessions(conn, projects_root, sessions)
+            self._flush_response_identities(conn, projects_root, new_responses)
             self._flush_watermarks(conn, projects_root, offsets)
         return stats
 
@@ -535,6 +613,92 @@ class Store:
                 (projects_root,),
             ).fetchall()
         return {row["path"]: row["offset"] for row in rows}
+
+    def _load_response_identities(
+        self, projects_root: str, min_ts: datetime
+    ) -> set[tuple[str, str]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT identities.message_id, identities.request_id"
+                " FROM response_identities AS identities"
+                " LEFT JOIN sessions_rollup AS sessions"
+                "   ON sessions.projects_root = identities.projects_root"
+                "  AND sessions.session_id = identities.session_id"
+                " WHERE identities.projects_root = ?"
+                "   AND (identities.response_ts >= ?"
+                "     OR (identities.session_id IS NOT NULL AND sessions.session_id IS NOT NULL))",
+                (projects_root, _iso(min_ts)),
+            ).fetchall()
+        return {(row["message_id"], row["request_id"]) for row in rows}
+
+    def _backfill_response_identities(
+        self, root: Path, projects_root: str, watermarks: dict[str, int]
+    ) -> None:
+        """Seed an upgraded database's index from bytes its watermarks already consumed.
+
+        The additive rollups cannot safely be replayed: that would count every old
+        response twice. Instead read only through each committed offset and record
+        identities, leaving all sums and watermarks untouched. A missing/truncated
+        transcript leaves the root pending so a later healthy scan can still recover
+        it; marking it complete would silently make a future fork double-count.
+        """
+        with self._connect() as conn:
+            needed = conn.execute(
+                "SELECT 1 FROM attribution_migrations WHERE name = ?",
+                ("response-identities-v1",),
+            ).fetchone()
+            complete = conn.execute(
+                "SELECT 1 FROM response_identity_backfills WHERE projects_root = ?",
+                (projects_root,),
+            ).fetchone()
+        if needed is None or complete is not None or not watermarks:
+            return
+
+        paths, scan_succeeded = attribution.scan_jsonl_files(root)
+        responses: dict[tuple[str, str], tuple[datetime, str]] = {}
+        found: set[str] = set()
+        for path in paths:
+            key = _sqlite_text(str(path))
+            end_offset = watermarks.get(key)
+            if end_offset is None:
+                continue
+            found.add(key)
+            try:
+                if path.stat().st_size < end_offset:
+                    scan_succeeded = False
+                    continue
+            except OSError:
+                scan_succeeded = False
+                continue
+            offset = 0
+            session_fallback = _session_fallback(root, path)
+            while offset < end_offset:
+                lines, next_offset, read_succeeded = attribution.read_new_lines_with_health(
+                    path, offset, end_offset=end_offset
+                )
+                if not read_succeeded or next_offset <= offset:
+                    scan_succeeded = False
+                    break
+                for turn in attribution.parse_lines(lines):
+                    if turn.response_identity is not None:
+                        session_id = turn.session_id
+                        if session_id == attribution.UNKNOWN:
+                            session_id = session_fallback
+                        responses.setdefault(turn.response_identity, (turn.ts, session_id))
+                offset = next_offset
+
+        with self._connect() as conn:
+            self._flush_response_identities(conn, projects_root, responses)
+            # Preserve every identity recovered from a healthy transcript even when
+            # another watermark cannot yet be read.  The completion marker remains
+            # pending so a later scan can seed the missing identity, but discarding
+            # the healthy subset would let a new fork count those responses again.
+            if not scan_succeeded or found != set(watermarks):
+                return
+            conn.execute(
+                "INSERT OR IGNORE INTO response_identity_backfills (projects_root) VALUES (?)",
+                (projects_root,),
+            )
 
     @staticmethod
     def _flush_hourly(
@@ -617,6 +781,24 @@ class Store:
             [
                 (projects_root, path, off, size, mtime)
                 for path, (off, size, mtime) in offsets.items()
+            ],
+        )
+
+    @staticmethod
+    def _flush_response_identities(
+        conn: sqlite3.Connection,
+        projects_root: str,
+        responses: dict[tuple[str, str], tuple[datetime, str]],
+    ) -> None:
+        if not responses:
+            return
+        conn.executemany(
+            "INSERT OR IGNORE INTO response_identities"
+            " (projects_root, message_id, request_id, response_ts, session_id)"
+            " VALUES (?, ?, ?, ?, ?)",
+            [
+                (projects_root, message_id, request_id, _iso(ts), session_id)
+                for (message_id, request_id), (ts, session_id) in responses.items()
             ],
         )
 
