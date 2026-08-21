@@ -28,6 +28,7 @@ from .redact import scrub_json
 from .usage import UsageSnapshot
 
 SCHEMA = """
+BEGIN IMMEDIATE;
 CREATE TABLE IF NOT EXISTS samples (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     ts          TEXT    NOT NULL,
@@ -206,6 +207,9 @@ class Store:
             # them. Remember this beforehand: an existing database without this
             # table has already advanced its watermarks past responses whose
             # identities must be recovered before a later fork can be deduplicated.
+            # SCHEMA starts a transaction, so its new tables and this marker commit
+            # together. A shutdown cannot leave a table that suppresses the backfill
+            # without the marker that requests it.
             had_response_identities = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'response_identities'"
             ).fetchone()

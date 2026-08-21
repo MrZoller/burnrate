@@ -925,6 +925,33 @@ def test_upgrade_backfills_identities_before_a_later_fork_is_folded(tmp_path):
     assert sessions[0]["total_tokens"] == 150
 
 
+def test_upgrade_does_not_commit_identity_table_without_its_backfill_marker(tmp_path, monkeypatch):
+    """An interrupted upgrade must retry rather than suppressing identity recovery."""
+    db_path = tmp_path / "b.db"
+    Store(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DROP TABLE response_identities")
+        conn.execute("DROP TABLE attribution_migrations")
+        conn.execute("DROP TABLE response_identity_backfills")
+
+    def interrupted_migration(_conn):
+        raise RuntimeError("simulated shutdown during upgrade")
+
+    monkeypatch.setattr(Store, "_migrate", staticmethod(interrupted_migration))
+    with pytest.raises(RuntimeError, match="simulated shutdown"):
+        Store(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+                " AND name IN ('response_identities', 'attribution_migrations')"
+            )
+        }
+    assert tables == set()
+
+
 def test_upgrade_backfill_keeps_healthy_identities_when_another_file_is_truncated(tmp_path):
     """A pending incomplete backfill must still protect its recovered responses."""
     now = datetime.now(UTC)
