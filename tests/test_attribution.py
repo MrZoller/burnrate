@@ -16,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from burnrate import attribution
+from burnrate import store as store_module
 from burnrate.app import ATTRIBUTION_SCOPE, create_app
 from burnrate.attribution import (
     ParseStats,
@@ -541,6 +542,318 @@ def test_distinct_surrogate_paths_keep_sqlite_identities(tmp_path, monkeypatch):
     assert len(sessions) == 2
     assert {session["total_tokens"] for session in sessions} == {61, 63}
     assert all(session["session_id"].startswith("unknown:") for session in sessions)
+
+
+# ------------------------------------------------ filesystem identity v1 (T10)
+
+
+def test_filesystem_identity_keeps_ordinary_text_unchanged(tmp_path):
+    """The new type separation must not change ordinary textual identities."""
+    now = datetime.now(UTC)
+    root = _tree(
+        tmp_path / "projects",
+        {"session.jsonl": [_assistant(session="ordinary-session", ts=now, input_tokens=17)]},
+    )
+    store = Store(tmp_path / "b.db")
+
+    store.aggregate_jsonl(root)
+
+    assert (
+        dict(store.attribution_totals(root, 168, now=now)["by_project"])["/home/dev/proj-burnrate"]
+        == 67
+    )
+    sessions = store.attribution_sessions(root, 168, now=now)
+    assert [session["session_id"] for session in sessions] == ["ordinary-session"]
+
+
+def test_literal_surrogate_escape_and_raw_byte_paths_are_distinct(tmp_path, monkeypatch):
+    """A literal ``\\udc80`` name must not collide with filesystem byte 0x80.
+
+    Both transcripts omit sessionId, exercising the path-derived fallback as well as
+    watermark identities.  The old backslash-escape encoding gave these two names the
+    same SQLite TEXT value.
+    """
+    now = datetime.now(UTC)
+    root = tmp_path / "projects"
+    literal = root / "proj" / r"\udc80.jsonl"
+    raw = root / "proj" / "\udc80.jsonl"
+    lines = {
+        literal: _assistant(session=None, ts=now, input_tokens=11),
+        raw: _assistant(session=None, ts=now, input_tokens=13),
+    }
+    monkeypatch.setattr(attribution, "scan_jsonl_files", lambda _: ([literal, raw], True))
+
+    def read_once(path: Path, offset: int):
+        return ([lines[path]], 1, True) if offset == 0 else ([], offset, True)
+
+    monkeypatch.setattr(attribution, "read_new_lines_with_health", read_once)
+    original_stat = Path.stat
+
+    def stat_synthetic_path(self: Path, *, follow_symlinks: bool = True):
+        if self in lines:
+            return SimpleNamespace(st_size=1, st_mtime=0.0)
+        return original_stat(self, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", stat_synthetic_path)
+    store = Store(tmp_path / "b.db")
+
+    assert store.aggregate_jsonl(root).emitted == 2
+    assert store.aggregate_jsonl(root).emitted == 0
+
+    sessions = store.attribution_sessions(root, 168, now=now)
+    assert {session["total_tokens"] for session in sessions} == {61, 63}
+    assert len({session["session_id"] for session in sessions}) == 2
+
+
+def test_raw_byte_projects_root_does_not_collide_with_literal_escape_root(tmp_path, monkeypatch):
+    """Configured roots retain separate namespaces across the TEXT/BLOB boundary."""
+    now = datetime.now(UTC)
+    literal_root = tmp_path / r"projects-\udc81"
+    raw_root = tmp_path / "projects-\udc81"
+    literal_path = literal_root / "literal.jsonl"
+    raw_path = raw_root / "raw.jsonl"
+    lines = {
+        literal_path: _assistant(ts=now, input_tokens=7),
+        raw_path: _assistant(ts=now, input_tokens=19),
+    }
+    monkeypatch.setattr(store_module, "normalize_projects_root", lambda root: Path(root))
+    monkeypatch.setattr(
+        attribution,
+        "scan_jsonl_files",
+        lambda root: ([literal_path], True) if root == literal_root else ([raw_path], True),
+    )
+
+    def read_once(path: Path, offset: int):
+        return ([lines[path]], 1, True) if offset == 0 else ([], offset, True)
+
+    monkeypatch.setattr(attribution, "read_new_lines_with_health", read_once)
+    original_stat = Path.stat
+
+    def stat_synthetic_root(self: Path, *, follow_symlinks: bool = True):
+        if self in lines:
+            return SimpleNamespace(st_size=1, st_mtime=0.0)
+        return original_stat(self, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", stat_synthetic_root)
+    store = Store(tmp_path / "b.db")
+
+    store.aggregate_jsonl(literal_root)
+    store.aggregate_jsonl(raw_root)
+
+    literal_total = sum(
+        tokens for _, tokens in store.attribution_totals(literal_root, 168, now=now)["by_project"]
+    )
+    raw_total = sum(
+        tokens for _, tokens in store.attribution_totals(raw_root, 168, now=now)["by_project"]
+    )
+    assert literal_total == 57
+    assert raw_total == 69
+
+
+def _make_pre_t10_database(db_path: Path, root: Path) -> None:
+    """Create attribution, then remove only T10's version markers."""
+    Store(db_path).aggregate_jsonl(root)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DROP TABLE attribution_identity_state")
+        conn.execute("DROP TABLE attribution_rebuilds")
+
+
+def test_pre_t10_rows_are_quarantined_then_rebuilt_from_transcripts(tmp_path):
+    """Upgrade hides ambiguous old totals and promotes only transcript-derived data."""
+    now = datetime.now(UTC)
+    root = _tree(tmp_path / "projects", {"session.jsonl": [_assistant(ts=now, input_tokens=23)]})
+    db_path = tmp_path / "b.db"
+    _make_pre_t10_database(db_path, root)
+
+    upgraded = Store(db_path)
+    totals = upgraded.attribution_totals(root, 168, now=now)
+    total = sum(tokens for _, tokens in totals["by_project"])
+    assert total == 0
+
+    upgraded.aggregate_jsonl(root)
+
+    totals = upgraded.attribution_totals(root, 168, now=now)
+    total = sum(tokens for _, tokens in totals["by_project"])
+    assert total == 73
+    with upgraded._connect() as conn:
+        # The old records are retained, but no longer use the active root namespace.
+        assert conn.execute("SELECT COUNT(*) FROM hourly_usage").fetchone()[0] == 2
+
+
+def test_rebuild_restores_response_identities_before_a_later_fork(tmp_path):
+    """The rebuilt identity index prevents a copied response from being counted again."""
+    now = datetime.now(UTC)
+    response = _assistant(
+        ts=now, input_tokens=31, message_id="msg-rebuild", request_id="req-rebuild"
+    )
+    root = _tree(tmp_path / "projects", {"original.jsonl": [response]})
+    db_path = tmp_path / "b.db"
+    _make_pre_t10_database(db_path, root)
+    upgraded = Store(db_path)
+
+    upgraded.aggregate_jsonl(root)
+    _tree(root, {"fork.jsonl": [response]})
+    upgraded.aggregate_jsonl(root)
+
+    totals = upgraded.attribution_totals(root, 168, now=now)
+    total = sum(tokens for _, tokens in totals["by_project"])
+    assert total == 81
+
+
+def test_rebuild_keeps_healthy_checkpoint_across_restart_when_sibling_is_unhealthy(
+    tmp_path, monkeypatch
+):
+    """A pending rebuild resumes a healthy file rather than replaying it after restart."""
+    now = datetime.now(UTC)
+    root = _tree(
+        tmp_path / "projects",
+        {
+            "healthy.jsonl": [_assistant(ts=now, input_tokens=10)],
+            "broken.jsonl": [_assistant(cwd="/work/broken", ts=now, input_tokens=20)],
+        },
+    )
+    db_path = tmp_path / "b.db"
+    _make_pre_t10_database(db_path, root)
+    healthy = root / "proj-0" / "healthy.jsonl"
+    broken = root / "proj-1" / "broken.jsonl"
+    original_read = attribution.read_new_lines_with_health
+    healthy_offsets: list[int] = []
+    broken_unhealthy = True
+
+    def read_with_broken_sibling(path: Path, offset: int, **kwargs):
+        if path == healthy:
+            healthy_offsets.append(offset)
+        if path == broken and broken_unhealthy:
+            return [], offset, False
+        return original_read(path, offset, **kwargs)
+
+    monkeypatch.setattr(attribution, "read_new_lines_with_health", read_with_broken_sibling)
+    first = Store(db_path).aggregate_jsonl(root)
+    assert first.scan_succeeded is False
+
+    # A new Store models process restart while the sibling remains unreadable.
+    second = Store(db_path).aggregate_jsonl(root)
+    assert second.scan_succeeded is False
+    assert healthy_offsets.count(0) == 1
+
+    broken_unhealthy = False
+    Store(db_path).aggregate_jsonl(root)
+    upgraded = Store(db_path)
+    totals = upgraded.attribution_totals(root, 168, now=now)
+    total = sum(tokens for _, tokens in totals["by_project"])
+    assert total == 130
+
+
+def test_rebuild_discards_staging_if_a_checkpointed_transcript_disappears(tmp_path, monkeypatch):
+    """A completed retry cannot promote tokens from a transcript that has since vanished."""
+    now = datetime.now(UTC)
+    root = _tree(
+        tmp_path / "projects",
+        {
+            "healthy.jsonl": [_assistant(ts=now, input_tokens=10)],
+            "broken.jsonl": [_assistant(cwd="/work/broken", ts=now, input_tokens=20)],
+        },
+    )
+    db_path = tmp_path / "b.db"
+    _make_pre_t10_database(db_path, root)
+    healthy = root / "proj-0" / "healthy.jsonl"
+    broken = root / "proj-1" / "broken.jsonl"
+    original_read = attribution.read_new_lines_with_health
+    broken_unhealthy = True
+
+    def read_with_transient_failure(path: Path, offset: int, **kwargs):
+        if path == broken and broken_unhealthy:
+            return [], offset, False
+        return original_read(path, offset, **kwargs)
+
+    monkeypatch.setattr(attribution, "read_new_lines_with_health", read_with_transient_failure)
+    assert Store(db_path).aggregate_jsonl(root).scan_succeeded is False
+
+    healthy.unlink()
+    broken_unhealthy = False
+    upgraded = Store(db_path)
+    assert upgraded.aggregate_jsonl(root).scan_succeeded is True
+
+    totals = upgraded.attribution_totals(root, 168, now=now)
+    assert sum(tokens for _, tokens in totals["by_project"]) == 70
+
+
+def test_rebuild_replaces_staged_transcript_after_it_is_truncated(tmp_path, monkeypatch):
+    """A retry must replace, rather than add to, a checkpointed truncated transcript."""
+    now = datetime.now(UTC)
+    old_healthy = [
+        _assistant(ts=now, input_tokens=10),
+        _assistant(ts=now, input_tokens=10),
+    ]
+    replacement = _assistant(ts=now, input_tokens=40)
+    root = _tree(
+        tmp_path / "projects",
+        {
+            "healthy.jsonl": old_healthy,
+            "broken.jsonl": [_assistant(cwd="/work/broken", ts=now, input_tokens=20)],
+        },
+    )
+    db_path = tmp_path / "b.db"
+    _make_pre_t10_database(db_path, root)
+    healthy = root / "proj-0" / "healthy.jsonl"
+    broken = root / "proj-1" / "broken.jsonl"
+    original_read = attribution.read_new_lines_with_health
+    broken_unhealthy = True
+
+    def read_with_transient_failure(path: Path, offset: int, **kwargs):
+        if path == broken and broken_unhealthy:
+            return [], offset, False
+        return original_read(path, offset, **kwargs)
+
+    monkeypatch.setattr(attribution, "read_new_lines_with_health", read_with_transient_failure)
+    assert Store(db_path).aggregate_jsonl(root).scan_succeeded is False
+
+    healthy.write_text(replacement + "\n")
+    broken_unhealthy = False
+    upgraded = Store(db_path)
+    assert upgraded.aggregate_jsonl(root).scan_succeeded is True
+
+    totals = upgraded.attribution_totals(root, 168, now=now)
+    # replacement (40 + 50) plus the formerly broken sibling (20 + 50), not the
+    # checkpointed two old healthy turns plus replacement.
+    assert sum(tokens for _, tokens in totals["by_project"]) == 160
+
+
+def test_rebuild_rolls_back_an_entire_file_checkpoint_when_flush_fails(tmp_path, monkeypatch):
+    """No partial staged fold or watermark may survive a failed file flush."""
+    now = datetime.now(UTC)
+    root = _tree(tmp_path / "projects", {"session.jsonl": [_assistant(ts=now, input_tokens=41)]})
+    db_path = tmp_path / "b.db"
+    _make_pre_t10_database(db_path, root)
+    upgraded = Store(db_path)
+    original_flush = Store.__dict__["_flush_response_identities"]
+
+    def fail_responses(*args, **kwargs):
+        raise sqlite3.OperationalError("simulated response flush failure")
+
+    monkeypatch.setattr(Store, "_flush_response_identities", staticmethod(fail_responses))
+    with pytest.raises(sqlite3.OperationalError, match="simulated response flush failure"):
+        upgraded.aggregate_jsonl(root)
+
+    monkeypatch.setattr(Store, "_flush_response_identities", original_flush)
+    retried = upgraded.aggregate_jsonl(root)
+    assert retried.emitted == 1
+    totals = upgraded.attribution_totals(root, 168, now=now)
+    total = sum(tokens for _, tokens in totals["by_project"])
+    assert total == 91
+
+
+def test_fresh_database_uses_incremental_aggregation_not_rebuild(tmp_path, monkeypatch):
+    """New installs have no ambiguous rows and must avoid the expensive rebuild path."""
+    now = datetime.now(UTC)
+    root = _tree(tmp_path / "projects", {"session.jsonl": [_assistant(ts=now)]})
+    store = Store(tmp_path / "b.db")
+
+    def rebuild_must_not_run(*args, **kwargs):
+        raise AssertionError("fresh database unexpectedly requested a rebuild")
+
+    monkeypatch.setattr(store, "_rebuild_attribution", rebuild_must_not_run)
+    assert store.aggregate_jsonl(root).emitted == 1
 
 
 def test_post_read_stat_failure_keeps_aggregated_turns_watermarked(tmp_path, monkeypatch):
