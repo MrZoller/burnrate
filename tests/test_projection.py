@@ -11,6 +11,7 @@ from burnrate.projection import (
     INSUFFICIENT_DATA,
     ON_PACE,
     ON_PACE_TO_CAP,
+    PACE_LABELS,
     PROJECTED,
     TOO_EARLY,
     UNAVAILABLE,
@@ -439,18 +440,24 @@ def test_elapsed_fraction_tracks_the_reading_not_the_wall_clock():
     ],
 )
 def test_the_verdict_boundary_is_the_diagonal(utilization, elapsed_hours, expected):
-    """Two visible tiers, split by the burn%-vs-elapsed% diagonal: on/below it is
-    green `on_pace`, above it is red `on_pace_to_cap`.
-
-    The issue's middle tier -- amber `ahead_of_pace` (burn% > elapsed% yet the
-    projection still clears the reset) -- is provably unreachable under pure linear
-    projection: burn% > elapsed% is equivalent to the pace crossing 100% before the
-    reset, so there is no gap for amber to occupy. It stays in `_classify_pace` as a
-    faithful, defensive rendering of the issue's tree; a follow-up issue will define a
-    real amber threshold. This test pins the two tiers that actually render so the
-    boundary cannot drift unnoticed.
-    """
+    """The only judged tiers split on the burn%-vs-elapsed% diagonal."""
     assert at_window_age(utilization, elapsed_hours).status == expected
+
+
+def test_projection_pace_vocabulary_has_only_green_red_and_neutral_verdicts():
+    """The public pace mapping has no dormant amber result for callers to render."""
+    supported = {
+        ON_PACE: "On pace",
+        ON_PACE_TO_CAP: "On pace to cap",
+        TOO_EARLY: "Too early to tell",
+        UNKNOWN_PACE: "Unknown",
+    }
+
+    assert PACE_LABELS == supported
+
+    for utilization in (0.0, 1.0, 34.0, 50.0, 100.0):
+        for elapsed_hours in (0.25, 23.0, 84.0, 120.0):
+            assert at_window_age(utilization, elapsed_hours).status in supported
 
 
 def test_pace_reuses_the_projection_states():

@@ -188,9 +188,7 @@ faster than the clock reads green (**On pace**); a pace projected to reach the c
 before the window resets reads red (**On pace to cap**). A window too new to judge,
 or an unrecognized bucket, stays neutral (**Too early to tell** / **Unknown**) —
 never a color-coded verdict. Each gauge pairs the color with the written pace
-word, so the color is never the only signal. (An amber **Ahead of pace** tier also
-exists in the code but is an unreachable boundary case under the current linear
-projection — a real threshold for it is a planned follow-up.)
+word, so the color is never the only signal.
 
 Under each gauge is a thin time-elapsed bar — window start at the left, reset at
 the right, a marker at the reading — so percent-of-time-elapsed reads directly
