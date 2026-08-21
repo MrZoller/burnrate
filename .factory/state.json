@@ -3,9 +3,9 @@
   "phase": "build",
   "spec_approved": true,
   "plan_approved": true,
-  "current_task": "T7",
-  "branch": "factory/t7-remove-amber-tier",
-  "pr": 37,
+  "current_task": null,
+  "branch": null,
+  "pr": null,
   "hold": false,
-  "updated": "2026-08-21T04:18:49Z"
+  "updated": "2026-08-21T05:28:50Z"
 }
