@@ -111,6 +111,9 @@ CREATE TABLE IF NOT EXISTS response_identities (
     message_id    TEXT NOT NULL,
     request_id    TEXT NOT NULL,
     response_ts   TEXT NOT NULL,
+    -- An old response remains deduplicable while its still-active session is
+    -- visible. Its own timestamp can predate the hourly retention window.
+    session_id    TEXT,
     PRIMARY KEY (projects_root, message_id, request_id)
 );
 CREATE INDEX IF NOT EXISTS idx_response_identities_ts
@@ -198,6 +201,11 @@ class Store:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(samples)")}
         if "known" not in columns:
             conn.execute("ALTER TABLE samples ADD COLUMN known INTEGER NOT NULL DEFAULT 1")
+        response_identity_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(response_identities)")
+        }
+        if response_identity_columns and "session_id" not in response_identity_columns:
+            conn.execute("ALTER TABLE response_identities ADD COLUMN session_id TEXT")
         hourly_columns = {row["name"] for row in conn.execute("PRAGMA table_info(hourly_usage)")}
         if hourly_columns and "projects_root" not in hourly_columns:
             large_context = (
@@ -448,8 +456,19 @@ class Store:
             # By end_ts: a session that was still active inside the window is kept whole
             # even if it opened before the cutoff, so its span is not truncated.
             conn.execute("DELETE FROM sessions_rollup WHERE end_ts < ?", (attribution_cutoff,))
+            # Identities follow the session lifetime, not the hourly window: an old
+            # turn remains part of a live session's lifetime total and a later
+            # resume/fork copy must not add it again. Pre-session-id rows are from
+            # the original index schema, so retain their old bounded behavior.
             conn.execute(
-                "DELETE FROM response_identities WHERE response_ts < ?", (attribution_cutoff,)
+                "DELETE FROM response_identities AS identities"
+                " WHERE (session_id IS NULL AND response_ts < ?)"
+                " OR (session_id IS NOT NULL AND NOT EXISTS ("
+                "   SELECT 1 FROM sessions_rollup AS sessions"
+                "   WHERE sessions.projects_root = identities.projects_root"
+                "     AND sessions.session_id = identities.session_id"
+                "     AND sessions.end_ts >= ?))",
+                (attribution_cutoff, attribution_cutoff),
             )
 
     # ------------------------------------------------------------ attribution
@@ -481,7 +500,7 @@ class Store:
         hourly: dict[tuple[str, str, str, int], list[int]] = {}
         sessions: dict[str, _SessionAcc] = {}
         offsets: dict[str, tuple[int, int | None, float | None]] = {}
-        new_responses: dict[tuple[str, str], datetime] = {}
+        new_responses: dict[tuple[str, str], tuple[datetime, str]] = {}
         stats = AggregateStats()
 
         # The scan is the iteration: making a second traversal would let a disappearing
@@ -514,20 +533,19 @@ class Store:
                     break
                 saw_new = True
                 for turn in attribution.parse_lines(lines, pass_stats):
+                    session_id = turn.session_id
+                    if session_id == attribution.UNKNOWN:
+                        session_id = session_fallback
                     identity = turn.response_identity
                     if identity is not None:
                         if identity in seen_responses:
                             continue
                         # Claim it before folding so a copy in another file in this same
-                        # pass is skipped. Only recent identities are persisted: keeping
-                        # this index aligned with rollup retention bounds its size, while
-                        # the in-pass set still deduplicates an initial scan's old rows.
+                        # pass is skipped. Identities track the session's retention: old
+                        # turns are still part of a live session's lifetime total, so a
+                        # later copied transcript must remain recognizable.
                         seen_responses.add(identity)
-                        if turn.ts >= min_ts:
-                            new_responses[identity] = turn.ts
-                    session_id = turn.session_id
-                    if session_id == attribution.UNKNOWN:
-                        session_id = session_fallback
+                        new_responses[identity] = (turn.ts, session_id)
                     _fold_turn(hourly, sessions, turn, session_id, fold_hourly=turn.ts >= min_ts)
                 offset = new_offset
 
@@ -571,9 +589,15 @@ class Store:
     ) -> set[tuple[str, str]]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT message_id, request_id FROM response_identities"
-                " WHERE projects_root = ? AND response_ts >= ?",
-                (projects_root, _iso(min_ts)),
+                "SELECT identities.message_id, identities.request_id"
+                " FROM response_identities AS identities"
+                " LEFT JOIN sessions_rollup AS sessions"
+                "   ON sessions.projects_root = identities.projects_root"
+                "  AND sessions.session_id = identities.session_id"
+                " WHERE identities.projects_root = ?"
+                "   AND (identities.response_ts >= ?"
+                "     OR (identities.session_id IS NOT NULL AND sessions.end_ts >= ?))",
+                (projects_root, _iso(min_ts), _iso(min_ts)),
             ).fetchall()
         return {(row["message_id"], row["request_id"]) for row in rows}
 
@@ -665,16 +689,17 @@ class Store:
     def _flush_response_identities(
         conn: sqlite3.Connection,
         projects_root: str,
-        responses: dict[tuple[str, str], datetime],
+        responses: dict[tuple[str, str], tuple[datetime, str]],
     ) -> None:
         if not responses:
             return
         conn.executemany(
             "INSERT OR IGNORE INTO response_identities"
-            " (projects_root, message_id, request_id, response_ts) VALUES (?, ?, ?, ?)",
+            " (projects_root, message_id, request_id, response_ts, session_id)"
+            " VALUES (?, ?, ?, ?, ?)",
             [
-                (projects_root, message_id, request_id, _iso(ts))
-                for (message_id, request_id), ts in responses.items()
+                (projects_root, message_id, request_id, _iso(ts), session_id)
+                for (message_id, request_id), (ts, session_id) in responses.items()
             ],
         )
 

@@ -891,6 +891,32 @@ def test_cross_file_duplicate_response_is_skipped_in_a_later_pass(tmp_path):
     assert sessions[0]["total_tokens"] == 150
 
 
+def test_cross_file_duplicate_old_response_stays_deduplicated_for_live_session(tmp_path):
+    """A long-lived session retains an old response identity for a later fork copy."""
+    now = datetime.now(UTC)
+    old_response = _assistant(
+        session="s1",
+        ts=now - timedelta(days=45),
+        message_id="msg-old-copied",
+        request_id="req-old-copied",
+    )
+    fresh_response = _assistant(
+        session="s1",
+        ts=now,
+        message_id="msg-fresh",
+        request_id="req-fresh",
+    )
+    root = _tree(tmp_path / "projects", {"original.jsonl": [old_response, fresh_response]})
+    store = Store(tmp_path / "b.db")
+    store.aggregate_jsonl(root, retention_days=30)
+    _tree(root, {"fork.jsonl": [old_response]})
+
+    store.aggregate_jsonl(root, retention_days=30)
+
+    sessions = store.attribution_sessions(root, 168, now=now)
+    assert sessions[0]["total_tokens"] == 300
+
+
 def test_responses_sharing_only_one_identity_component_are_both_counted(tmp_path):
     """Retries can share one ID, so only the complete message/request pair deduplicates."""
     now = datetime.now(UTC)
