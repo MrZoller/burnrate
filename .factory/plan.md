@@ -30,7 +30,7 @@ related-issue references; only explicit prerequisites would constrain selection.
 - [x] T6 (standard) — attribution: surface aggregation freshness / health so a stalled aggregator does not serve stale rollups as current (follow-up to #16) (Fixes #21)
   - acceptance: the last successful aggregation time is exposed by `/api/attribution` and is not advanced by a failed aggregation; the static attribution panel labels when counts were generated and visibly reports a persistently failed/stale aggregator instead of presenting frozen rollups as current; poller/API tests cover success and failure, with the UI behavior manually verified
   - pr: 32
-- [ ] T7 (standard) — dashboard: "Ahead of pace" (amber) pace tier is unreachable under linear projection (follow-up to #15) (Fixes #18)
+- [~] T7 (standard) — dashboard: "Ahead of pace" (amber) pace tier is unreachable under linear projection (follow-up to #15) (Fixes #18)
   - acceptance: remove the amber/ahead tier from projection, API, and dashboard vocabulary while preserving green, red, and neutral behavior; tests prove no projection result or rendered status uses the removed tier
 - [x] T8 (trivial) — dashboard: details-table status word is not staleness-aware (follow-up to #5) (Fixes #13)
   - acceptance: `renderTable` receives snapshot staleness on success and outage paths; stale rows retain numeric details but show no live Healthy/Watch/Critical judgment or live color carrier; regression coverage verifies the static-page wiring
