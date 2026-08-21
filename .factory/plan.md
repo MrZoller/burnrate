@@ -18,7 +18,7 @@ related-issue references; only explicit prerequisites would constrain selection.
 - [x] T2 (standard) — attribution: changing BURNRATE_PROJECTS_DIR leaves the old root's rollups mixed in for 30 days (follow-up to #16) (Fixes #25)
   - acceptance: namespace attribution rollups by normalized projects root; `Config`, persistence, incremental aggregation, and `/api/attribution` query only the active root while retaining prior-root history in its own namespace; migration and root-switch tests prove totals never mix and no prior-root data is cleared
   - pr: 35
-- [ ] T3 (standard) — attribution: cross-file duplicate assistant rows (session resume/fork/compaction) double-count token totals (follow-up to #16) (Fixes #24)
+- [~] T3 (standard) — attribution: cross-file duplicate assistant rows (session resume/fork/compaction) double-count token totals (follow-up to #16) (Fixes #24)
   - acceptance: identify duplicate assistant responses across transcript files, persist their identities with bounded retention, and make incremental aggregation skip already-counted responses across resumed/forked/compacted files; tests cover in-pass and later-pass duplicates without suppressing distinct responses
 - [x] T4 (standard) — attribution: a non-UTF-8 filename freezes aggregation via the watermark/session-fallback binds (follow-up to #16) (Fixes #23)
   - acceptance: `aggregate_jsonl` commits a surrogate-bearing path and advances its watermark without `UnicodeEncodeError`; the session fallback is SQLite-bindable; a second unchanged pass reads no new rows or double-counts; tests cover both path-derived bind sites in `store.py`/`attribution.py`
