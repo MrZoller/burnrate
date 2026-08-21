@@ -683,10 +683,14 @@ class Store:
                         responses.setdefault(turn.response_identity, (turn.ts, session_id))
                 offset = next_offset
 
-        if not scan_succeeded or found != set(watermarks):
-            return
         with self._connect() as conn:
             self._flush_response_identities(conn, projects_root, responses)
+            # Preserve every identity recovered from a healthy transcript even when
+            # another watermark cannot yet be read.  The completion marker remains
+            # pending so a later scan can seed the missing identity, but discarding
+            # the healthy subset would let a new fork count those responses again.
+            if not scan_succeeded or found != set(watermarks):
+                return
             conn.execute(
                 "INSERT OR IGNORE INTO response_identity_backfills (projects_root) VALUES (?)",
                 (projects_root,),
