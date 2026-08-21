@@ -815,6 +815,14 @@ class Store:
                 "INSERT OR IGNORE INTO attribution_rebuilds (projects_root) VALUES (?)",
                 (projects_root,),
             )
+            # Rebuilding from byte zero has already recovered every response identity
+            # through the promoted watermarks. Close the older identity-backfill state
+            # in the same transaction so the next poll does not parse the whole tree a
+            # second time merely to rediscover rows just staged above.
+            conn.execute(
+                "INSERT OR IGNORE INTO response_identity_backfills (projects_root) VALUES (?)",
+                (projects_root,),
+            )
         return stats
 
     @staticmethod

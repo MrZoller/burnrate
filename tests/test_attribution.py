@@ -700,6 +700,26 @@ def test_rebuild_restores_response_identities_before_a_later_fork(tmp_path):
     assert total == 81
 
 
+def test_rebuild_completes_the_older_response_identity_backfill(tmp_path):
+    """A combined upgrade must not parse rebuilt transcripts again next poll."""
+    now = datetime.now(UTC)
+    root = _tree(tmp_path / "projects", {"original.jsonl": [_assistant(ts=now)]})
+    db_path = tmp_path / "b.db"
+    _make_pre_t10_database(db_path, root)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DROP TABLE response_identities")
+
+    upgraded = Store(db_path)
+    upgraded.aggregate_jsonl(root)
+
+    with upgraded._connect() as conn:
+        active_root = store_module._projects_root_identity(root)
+        assert conn.execute(
+            "SELECT 1 FROM response_identity_backfills WHERE projects_root = ?",
+            (active_root,),
+        ).fetchone()
+
+
 def test_rebuild_keeps_healthy_checkpoint_across_restart_when_sibling_is_unhealthy(
     tmp_path, monkeypatch
 ):
