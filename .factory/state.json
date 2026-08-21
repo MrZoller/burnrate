@@ -3,9 +3,9 @@
   "phase": "build",
   "spec_approved": true,
   "plan_approved": true,
-  "current_task": "T7",
-  "branch": "factory/t7-remove-amber-tier",
+  "current_task": "T10",
+  "branch": "factory/t10-parked-review-minors",
   "pr": null,
   "hold": false,
-  "updated": "2026-08-21T04:08:12Z"
+  "updated": "2026-08-21T11:17:09Z"
 }

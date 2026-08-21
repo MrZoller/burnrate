@@ -30,8 +30,9 @@ related-issue references; only explicit prerequisites would constrain selection.
 - [x] T6 (standard) — attribution: surface aggregation freshness / health so a stalled aggregator does not serve stale rollups as current (follow-up to #16) (Fixes #21)
   - acceptance: the last successful aggregation time is exposed by `/api/attribution` and is not advanced by a failed aggregation; the static attribution panel labels when counts were generated and visibly reports a persistently failed/stale aggregator instead of presenting frozen rollups as current; poller/API tests cover success and failure, with the UI behavior manually verified
   - pr: 32
-- [~] T7 (standard) — dashboard: "Ahead of pace" (amber) pace tier is unreachable under linear projection (follow-up to #15) (Fixes #18)
+- [x] T7 (standard) — dashboard: "Ahead of pace" (amber) pace tier is unreachable under linear projection (follow-up to #15) (Fixes #18)
   - acceptance: remove the amber/ahead tier from projection, API, and dashboard vocabulary while preserving green, red, and neutral behavior; tests prove no projection result or rendered status uses the removed tier
+  - pr: 37
 - [x] T8 (trivial) — dashboard: details-table status word is not staleness-aware (follow-up to #5) (Fixes #13)
   - acceptance: `renderTable` receives snapshot staleness on success and outage paths; stale rows retain numeric details but show no live Healthy/Watch/Critical judgment or live color carrier; regression coverage verifies the static-page wiring
   - pr: 33
@@ -55,9 +56,10 @@ related-issue references; only explicit prerequisites would constrain selection.
 
 ## Ad-hoc
 
-- [ ] T10 (trivial) — parked review minors (batch)
-  - acceptance: ship the accumulated non-blocking review minors as one focused, verified cleanup when the shepherd activates this rolling batch
+- [~] T10 (major) — parked review minors (batch)
+  - acceptance: per approved Q5 (2026-08-21), the combined cleanup uses an injective, versioned filesystem-byte identity without changing ordinary stored identities, proves transcript and projects-root collision isolation, rebuilds active attribution from source while preserving quarantined legacy rows, and durably checkpoints per-watermark response-identity backfill progress without losing atomicity
   - #30: replace the `backslashreplace` SQLite path identity with an injective filesystem-byte encoding; Codex finding from PR #29, verifier-classified minor
   - PR #35: make projects-root identity encoding injective for a surrogate-bearing path versus a literal `\udcXX` path; Codex finding, verifier-classified minor
   - PR #36 panel: decide whether to rebuild attribution on upgrade so response identities already represented only in legacy aggregate rows can be indexed; verifier-classified minor
   - PR #36: retain per-watermark partial-backfill progress so healthy transcripts are not reparsed on every aggregation while an unresolved source remains; Codex finding, verifier-classified minor
+  - released 2026-08-21 on Chris's ask (Q5 approved: combined major); parked branch: `factory/t10-parked-review-minors`
