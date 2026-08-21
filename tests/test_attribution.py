@@ -919,6 +919,41 @@ def test_upgrade_backfills_identities_before_a_later_fork_is_folded(tmp_path):
     assert sessions[0]["total_tokens"] == 150
 
 
+def test_upgrade_backfill_does_not_skip_bytes_after_a_watermark(tmp_path):
+    """Backfill must not mark appended responses seen before folding their tokens."""
+    now = datetime.now(UTC)
+    before = _assistant(
+        session="s1",
+        ts=now,
+        message_id="msg-before-upgrade",
+        request_id="req-before-upgrade",
+    )
+    appended = _assistant(
+        session="s1",
+        ts=now,
+        input_tokens=80,
+        output_tokens=0,
+        message_id="msg-after-watermark",
+        request_id="req-after-watermark",
+    )
+    root = _tree(tmp_path / "projects", {"original.jsonl": [before]})
+    db_path = tmp_path / "b.db"
+    Store(db_path).aggregate_jsonl(root)
+    _tree(root, {"original.jsonl": [before, appended]})
+
+    # Model an upgrade after the source file grew past the old EOF watermark.
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DROP TABLE response_identities")
+
+    upgraded = Store(db_path)
+    upgraded.aggregate_jsonl(root)
+
+    totals = upgraded.attribution_totals(root, 168, now=now)
+    sessions = upgraded.attribution_sessions(root, 168, now=now)
+    assert dict(totals["by_project"])["/home/dev/proj-burnrate"] == 230
+    assert sessions[0]["total_tokens"] == 230
+
+
 def test_cross_file_duplicate_old_response_stays_deduplicated_for_live_session(tmp_path):
     """A long-lived session retains an old response identity for a later fork copy."""
     now = datetime.now(UTC)

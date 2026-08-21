@@ -280,6 +280,7 @@ def read_new_lines_with_health(
         offset = 0
     if offset >= size:
         return [], offset, True
+    max_bytes = min(max_bytes, size - offset)
     try:
         with path.open("rb") as handle:
             handle.seek(offset)
