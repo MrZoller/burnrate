@@ -444,6 +444,23 @@ def test_the_verdict_boundary_is_the_diagonal(utilization, elapsed_hours, expect
     assert at_window_age(utilization, elapsed_hours).status == expected
 
 
+@pytest.mark.parametrize(
+    ("utilization", "elapsed_hours"),
+    [(0.32738095238095244, 0.55), (2.9761904761904763, 5.0)],
+)
+def test_fp_boundary_clears_reset_does_not_render_a_red_verdict(utilization, elapsed_hours):
+    """The hero and verdict use different FP paths at the diagonal boundary."""
+    bucket = Bucket(
+        "seven_day",
+        "Weekly (all models)",
+        utilization,
+        NOW + timedelta(hours=168 - elapsed_hours),
+    )
+
+    assert project(bucket, now=NOW).status == CLEARS_RESET
+    assert pace_for(bucket, now=NOW, reading_at=NOW).status == ON_PACE
+
+
 def test_projection_pace_vocabulary_has_only_green_red_and_neutral_verdicts():
     """The public pace mapping has no dormant amber result for callers to render."""
     supported = {

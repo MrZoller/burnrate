@@ -290,10 +290,10 @@ class Pace:
 def _classify_pace(projection: Projection, bucket: Bucket, elapsed_fraction: float | None) -> str:
     """Turn a projection into a pace verdict, sharing item 2's elapsed/burn math.
 
-    The diagonal is the whole verdict boundary: at or below elapsed time is "on
-    pace"; above it is "on pace to cap". Under this linear model, being above the
-    diagonal is mathematically equivalent to reaching 100% before the reset, so an
-    intermediate warning tier would be unreachable rather than useful.
+    The diagonal is the verdict boundary: at or below elapsed time is "on pace";
+    above it is "on pace to cap". `project()` reaches the same conclusion through
+    a different floating-point calculation, so honour its clears-reset result in
+    the one-ULP boundary gap rather than rendering a contradictory red verdict.
     """
     status = projection.status
     # No usable window at all -- no reset reported, a reset already passed, or one out
@@ -317,6 +317,8 @@ def _classify_pace(projection: Projection, bucket: Bucket, elapsed_fraction: flo
     if status == IDLE and (projection.elapsed_hours or 0.0) < MIN_WINDOW_HOURS:
         return TOO_EARLY
     if bucket.utilization / 100.0 <= elapsed_fraction:
+        return ON_PACE
+    if status == CLEARS_RESET:
         return ON_PACE
     # PROJECTED (crosses before the reset) or AT_CAP (already there).
     return ON_PACE_TO_CAP
