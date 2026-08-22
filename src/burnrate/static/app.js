@@ -714,6 +714,11 @@ function renderBanner(data, fetchError) {
     return;
   }
 
+  // Cleared, not just hidden. The text is only ever meaningful while the banner is
+  // up, so leaving the last cause in the DOM lets a resolved outage's wording be
+  // read back later -- which is how the static placeholder came to be on screen.
+  els.bannerTitle.textContent = "";
+  els.bannerDetail.textContent = "";
   els.banner.hidden = true;
   els.dot.dataset.state = "live";
 

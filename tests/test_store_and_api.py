@@ -549,3 +549,35 @@ def test_static_history_overlap_guard_is_served(client):
     assert "if (token < appliedHistory) return;" in history
     assert history.count("appliedHistory = token;") == 2
     assert "token !== historyRequest" not in history
+
+
+def test_static_hidden_attribute_actually_hides(client):
+    """`hidden` must beat a component's own `display`, or the banner never goes away.
+
+    Author styles win over the user-agent `[hidden] { display: none }` by cascade
+    origin, before specificity is consulted, so `.banner`'s own `display: flex` kept
+    the failure banner on screen through every healthy poll -- showing index.html's
+    placeholder text beside a green dot and a live "Updated" stamp.
+    """
+    css = " ".join(client.get("/style.css").text.split())
+
+    assert "[hidden] { display: none !important; }" in css
+    # Global, not patched onto the one component that happened to surface it.
+    assert ".banner[hidden]" not in css
+
+
+def test_static_banner_text_lives_only_while_the_banner_does(client):
+    """No warning wording in the DOM unless renderBanner actually put it there."""
+    page = client.get("/").text
+    script = client.get("/app.js").text
+    healthy = script.split("if (status.warnings?.length) {", 1)[1].split(
+        "function show(severity, title, detail) {", 1
+    )[0]
+
+    assert '<strong id="banner-title"></strong>' in page
+    assert "Data may be stale" not in page
+    # Still the wording the failing path reaches for -- it just comes from the JS now.
+    assert '"Data may be stale"' in script
+    assert 'els.bannerTitle.textContent = "";' in healthy
+    assert 'els.bannerDetail.textContent = "";' in healthy
+    assert "els.banner.hidden = true;" in healthy
