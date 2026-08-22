@@ -581,3 +581,43 @@ def test_static_banner_text_lives_only_while_the_banner_does(client):
     assert 'els.bannerTitle.textContent = "";' in healthy
     assert 'els.bannerDetail.textContent = "";' in healthy
     assert "els.banner.hidden = true;" in healthy
+
+
+def test_static_assets_must_revalidate(client):
+    """No build step means fixed asset names, so a cached copy must never be reused blind."""
+    response = client.get("/style.css")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-cache"
+    assert response.headers.get("etag")
+
+
+def test_static_revalidation_still_304s_and_keeps_the_header(client):
+    """`no-cache` must cost a round trip, not a re-download -- and survive the 304.
+
+    Starlette builds the 304 from a header allowlist, so a `Cache-Control` set on
+    the wrong side of that filter would be dropped exactly on the responses that
+    keep a long-lived tab's cache alive, and the next request would fall back to
+    heuristic freshness.
+    """
+    first = client.get("/app.js")
+    again = client.get("/app.js", headers={"If-None-Match": first.headers["etag"]})
+
+    assert again.status_code == 304
+    assert again.content == b""
+    assert again.headers["cache-control"] == "no-cache"
+
+
+def test_api_responses_are_never_stored(client):
+    """A replayed usage reading is the confident-wrong-number this app refuses to show."""
+    for path in ("/api/now", "/api/history?hours=1", "/api/attribution", "/api/healthz"):
+        response = client.get(path)
+        assert response.headers["cache-control"] == "no-store", path
+
+
+def test_api_no_store_covers_handler_errors(client):
+    """Middleware, not per-endpoint, so validation failures carry the header too."""
+    response = client.get("/api/history?hours=-1")
+
+    assert response.status_code == 422
+    assert response.headers["cache-control"] == "no-store"
