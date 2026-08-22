@@ -37,6 +37,17 @@
   box-sizing: border-box;
 }
 
+/* The `hidden` attribute hides an element only through the user-agent rule
+   `[hidden] { display: none }`, and author styles beat the UA origin before
+   specificity is ever consulted -- so any component that sets its own `display`
+   (`.banner` does) stays visible with `hidden` set, and `el.hidden = true` in the
+   JS silently does nothing. `!important` is what actually wins that cascade; a
+   plain `display: none` here would lose to the component rule exactly as the UA
+   rule does. */
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   background: var(--plane);
