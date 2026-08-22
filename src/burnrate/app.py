@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -42,6 +42,32 @@ logger = logging.getLogger("burnrate")
 # hold up /api/now and the health check along with it.
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+class RevalidatingStaticFiles(StaticFiles):
+    """Static assets the browser may keep but must revalidate before reusing.
+
+    There is no build step here, so `app.js` and `style.css` keep their names
+    forever and a changed file is invisible to a cache that never asks. Served
+    with only ETag/Last-Modified and no `Cache-Control`, browsers fall back to
+    heuristic freshness (a fraction of the time since Last-Modified) and reuse
+    the old asset without a request -- so a shipped frontend fix does not reach
+    an already-open dashboard until someone happens to hard-reload. This
+    dashboard is meant to sit in a pinned tab for days, which is exactly the
+    case heuristic caching gets wrong.
+
+    `no-cache` is the fix and is not `no-store`: the copy stays in the cache and
+    the conditional request still 304s on an unchanged file, so revalidation
+    costs a round trip and no body. Setting the header on whatever `super()`
+    hands back covers the 304 as well as the 200 -- an unchanged file has already
+    been collapsed into a NotModifiedResponse by this point, and a 304 that
+    dropped the header would put the next request back on heuristic freshness.
+    """
+
+    def file_response(self, *args: Any, **kwargs: Any) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 def create_app(config: Config | None = None) -> FastAPI:
@@ -135,8 +161,28 @@ def create_app(config: Config | None = None) -> FastAPI:
             status_code=200 if poller.status.healthy else 503,
         )
 
+    @app.middleware("http")
+    async def no_store_api_responses(request: Request, call_next: Any) -> Response:
+        """`Cache-Control: no-store` on every /api/ response.
+
+        The three dashboard fetches already pass `cache: "no-store"`, but that is
+        the client asking nicely and only binds that one caller. The endpoints are
+        reachable from anything on the tailnet and the whole contract of this app
+        is that a number on screen is either current or visibly marked stale, so a
+        proxy or a second client holding a 60-second-old /api/now and replaying it
+        as fresh is the one failure this dashboard is built to refuse.
+
+        Applied as middleware rather than per-endpoint so a future route cannot be
+        added without it. Errors raised out of a handler (a 422 from Query
+        validation) pass through here too and are covered.
+        """
+        response: Response = await call_next(request)
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
     if STATIC_DIR.is_dir():
-        app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+        app.mount("/", RevalidatingStaticFiles(directory=STATIC_DIR, html=True), name="static")
     else:  # pragma: no cover - only when the package is installed incorrectly
         logger.warning("static directory missing at %s; UI disabled", STATIC_DIR)
 
