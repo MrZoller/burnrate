@@ -7,7 +7,7 @@ forwarded answer `consumed` in the same bookkeeping commit.
 
 ---
 
-## Q1 (task T1, answered) — Which landed trusted workflow template should enable Claude reviews?
+## Q1 (task T1, consumed) — Which landed trusted workflow template should enable Claude reviews?
 Context: Issue #28 makes the fixed `MrZoller/opencode-factory` template an external prerequisite, but names no landed revision this repository can fetch or verify. T1 must not reconstruct the security-sensitive workflow from prose.
 Options considered: A — provide the exact landed template URL/commit and proceed / B — leave T1 blocked until that reference exists.
 **A:** Neither filed option — the prerequisite was withdrawn: opencode-factory#48 retired the Claude review gate (token exfiltration) and #47 removed the trusted template. T1 is retired; Codex remains the review gate. Answered by Chris via the operator session ask (2026-09-04); recorded by the operator. Supersedes the 2026-09-04 dashboard submission of "A", which targeted the retired option.

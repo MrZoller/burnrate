@@ -1,11 +1,11 @@
 {
   "project": "burnrate",
-  "phase": "idle",
+  "phase": "build",
   "spec_approved": true,
   "plan_approved": true,
   "current_task": null,
   "branch": null,
   "pr": null,
   "hold": false,
-  "updated": "2026-08-21T12:29:00Z"
+  "updated": "2026-09-04T10:51:20Z"
 }
