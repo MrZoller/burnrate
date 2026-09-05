@@ -720,6 +720,42 @@ def test_rebuild_completes_the_older_response_identity_backfill(tmp_path):
         ).fetchone()
 
 
+def test_rebuild_deduplicates_without_copying_cumulative_response_identities(tmp_path, monkeypatch):
+    """Each transcript consults the shared identity index without cloning it."""
+    now = datetime.now(UTC)
+    response = _assistant(ts=now, message_id="msg-shared", request_id="req-shared")
+    root = _tree(
+        tmp_path / "projects", {"first.jsonl": [response, response], "second.jsonl": [response]}
+    )
+    db_path = tmp_path / "b.db"
+    _make_pre_t10_database(db_path, root)
+    store = Store(db_path)
+
+    class SeenResponses:
+        values = set()
+
+        def __contains__(self, identity):
+            return identity in self.values
+
+        def __iter__(self):
+            raise AssertionError("cumulative identities must not be iterated per transcript")
+
+        def copy(self):
+            raise AssertionError("cumulative identities must not be copied per transcript")
+
+        def update(self, identities):
+            self.values.update(identities)
+
+    seen = SeenResponses()
+    monkeypatch.setattr(store, "_load_response_identities", lambda *_: seen)
+    assert store.aggregate_jsonl(root).scan_succeeded is True
+    assert (
+        sum(tokens for _, tokens in store.attribution_totals(root, 168, now=now)["by_project"])
+        == 150
+    )
+    assert len(seen.values) == 1
+
+
 def test_rebuild_keeps_healthy_checkpoint_across_restart_when_sibling_is_unhealthy(
     tmp_path, monkeypatch
 ):

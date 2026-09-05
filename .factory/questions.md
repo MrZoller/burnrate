@@ -7,27 +7,28 @@ forwarded answer `consumed` in the same bookkeeping commit.
 
 ---
 
-## Q1 (task T1, open) — Which landed trusted workflow template should enable Claude reviews?
+## Q1 (task T1, consumed) — Which landed trusted workflow template should enable Claude reviews?
 Context: Issue #28 makes the fixed `MrZoller/opencode-factory` template an external prerequisite, but names no landed revision this repository can fetch or verify. T1 must not reconstruct the security-sensitive workflow from prose.
-Options considered: provide the exact landed template URL/commit and proceed / leave T1 blocked until that reference exists.
-**A:**
+Options considered: A — provide the exact landed template URL/commit and proceed / B — leave T1 blocked until that reference exists.
+**A:** Neither filed option — the prerequisite was withdrawn: opencode-factory#48 retired the Claude review gate (token exfiltration) and #47 removed the trusted template. T1 is retired; Codex remains the review gate. Answered by Chris via the operator session ask (2026-09-04); recorded by the operator. Supersedes the 2026-09-04 dashboard submission of "A", which targeted the retired option.
 
 ## Q2 (task T2, consumed) — What are the acceptance semantics when BURNRATE_PROJECTS_DIR changes?
 Context: Issue #25 establishes that old-root rollups remain visible, but deliberately leaves the desired behavior undecided. The choice changes persistence, migration, and history-retention behavior.
-Options considered: clear old rollups on root change / namespace rollups by root and query only the active root / document and retain the current mixed-history behavior. Recommendation: namespace by root if preserving history matters; otherwise clear on change as the smaller honest behavior.
+Options considered: A — clear old rollups on root change / B — namespace rollups by root and query only the active root / C — document and retain the current mixed-history behavior. Recommendation: namespace by root if preserving history matters; otherwise clear on change as the smaller honest behavior.
 **A:** Namespace rollups by projects root and query only the active root. Prior-root history is preserved under its own namespace, never mixed into the active root's totals; no clearing.
 
 ## Q3 (task T3, consumed) — What level of cross-file response deduplication should attribution guarantee?
 Context: Issue #24 proves additive cross-file double counting but leaves the durability/cost tradeoff open. In-pass-only deduplication does not cover the continuously running incremental case.
-Options considered: persistent response-identity index with retention / explicitly limited in-pass-only deduplication / document and accept duplicate copies as part of the proxy model. Recommendation: persistent deduplication, because it is the only option that fixes the stated steady-state defect.
+Options considered: A — persistent response-identity index with retention / B — explicitly limited in-pass-only deduplication / C — document and accept duplicate copies as part of the proxy model. Recommendation: persistent deduplication, because it is the only option that fixes the stated steady-state defect.
 **A:** Guarantee persistent cross-file deduplication: a durable response-identity index with retention, so incremental passes never double-count the same response across resumed/forked/compacted transcript files.
 
 ## Q4 (task T7, consumed) — What should the amber pace tier mean?
 Context: Issue #18 shows that the current linear model makes amber unreachable, so implementation needs a product threshold or a smaller status vocabulary. No threshold is justified by the issue body.
-Options considered: define a margin above projected cap for red and use amber below it / define a different buffer model / remove amber and keep green-red-neutral. Recommendation: remove amber unless there is a user-backed warning threshold.
+Options considered: A — define a margin above projected cap for red and use amber below it / B — define a different buffer model / C — remove amber and keep green-red-neutral. Recommendation: remove amber unless there is a user-backed warning threshold.
 **A:** Remove the amber tier. Keep green / red / neutral; no invented threshold.
 
-## Q5 (task T10, consumed; parked branch: `factory/t10-parked-review-minors`) — Approve the parked-minors batch as a major data-identity change?
+## Q5 (task T10, consumed) — Approve the parked-minors batch as a major data-identity change?
+Parked branch: `factory/t10-parked-review-minors`
 Context: The four accumulated minors are not a trivial cleanup. Together they change durable identities across attribution tables and require additive migration state for per-watermark backfill checkpoints; the factory therefore reclassified T10 from trivial to major and reset plan approval before implementation. The safest design preserves ordinary stored identities, uses a versioned filesystem-byte encoding for exceptional paths, leaves already-ambiguous pathological identities quarantined rather than guessing ownership, rebuilds active attribution from source, and atomically persists response identities with partial-backfill progress.
-Options considered: approve the proposed combined major task and re-approve the revised plan / split out only the injective-identity fixes and leave backfill work parked / defer the whole batch. Recommendation: approve the combined major task so the related identity and upgrade invariants are tested together; its PR will be held for human merge authority.
+Options considered: A — approve the proposed combined major task and re-approve the revised plan / B — split out only the injective-identity fixes and leave backfill work parked / C — defer the whole batch. Recommendation: approve the combined major task so the related identity and upgrade invariants are tested together; its PR will be held for human merge authority.
 **A:** Approve the combined major task as recommended: one held PR covering the versioned injective filesystem-byte encoding (ordinary stored identities unchanged), quarantine of already-ambiguous legacy identities, rebuild of active attribution from source, and durable per-watermark response-identity backfill checkpoints. Re-approve the revised plan; the PR stays held for human-authority merge per major policy.

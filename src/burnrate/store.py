@@ -746,7 +746,6 @@ class Store:
             hourly: dict[tuple[str, str, str, int], list[int]] = {}
             sessions: dict[str | bytes, _SessionAcc] = {}
             responses: dict[tuple[str, str], tuple[datetime, str | bytes]] = {}
-            file_seen = set(seen_responses)
             pass_stats = ParseStats()
             saw_new = False
             healthy = True
@@ -769,9 +768,8 @@ class Store:
                         session_id = session_fallback
                     identity = turn.response_identity
                     if identity is not None:
-                        if identity in file_seen:
+                        if identity in seen_responses or identity in responses:
                             continue
-                        file_seen.add(identity)
                         responses[identity] = (turn.ts, session_id)
                     _fold_turn(
                         hourly,
@@ -802,7 +800,9 @@ class Store:
                     conn, staging_root, {key: (offset, info.st_size, info.st_mtime)}
                 )
             watermarks[key] = offset
-            seen_responses = file_seen
+            # Publish only this committed file's claims; copying the cumulative set
+            # per transcript makes a many-file rebuild quadratic in identity count.
+            seen_responses.update(responses)
             if saw_new:
                 stats.files_with_new_data += 1
                 stats.lines += pass_stats.lines
