@@ -65,5 +65,6 @@ related-issue references; only explicit prerequisites would constrain selection.
   - released 2026-08-21 on Chris's ask (Q5 approved: combined major); parked branch: `factory/t10-parked-review-minors`
   - pr: 38
 
-- [!] T11 (trivial) — parked review minors (batch)
+- [ ] T11 (trivial) — parked review minors (batch)
   - PR #38: avoid copying the cumulative response-identity set for every rebuild transcript; Codex finding, verifier-classified minor
+  - released 2026-09-05 17:42 UTC on Chris's ask (operator session, "release T11")
